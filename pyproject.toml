@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "spmd-types"
+name = "spmd_types"
 version = "0.1.0"
 description = "A type system for distributed (SPMD) tensor computations in PyTorch"
 readme = "README.md"
@@ -28,13 +28,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pytorch/spmd_types"
-Repository = "https://github.com/pytorch/spmd_types"
-Issues = "https://github.com/pytorch/spmd_types/issues"
+Homepage = "https://github.com/meta-pytorch/spmd_types"
+Repository = "https://github.com/meta-pytorch/spmd_types"
+Issues = "https://github.com/meta-pytorch/spmd_types/issues"
 
 [tool.setuptools.packages.find]
 include = ["spmd_types*"]
-exclude = ["*_test*", "*_test.py"]
+
 
 [tool.ruff]
 line-length = 120
@@ -47,5 +47,5 @@ select = ["E4", "E7", "E9", "F", "I"]
 quote-style = "double"
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["*_test.py"]
