@@ -2796,6 +2796,68 @@ def _infer_global_output_type(
 # TorchFunctionMode for SPMD Type Tracking
 # =============================================================================
 
+
+def _check_backward_loss_type(args: tuple, kwargs: dict) -> None:
+    """Validate that a loss tensor has a valid SPMD type for backward().
+
+    Called when torch.Tensor.backward is intercepted by __torch_function__.
+    Only checks when no explicit gradient is provided (the implicit grad_output
+    is a 1.0 scalar on each rank, which has Invariant semantics).
+
+    Raises:
+        SpmdTypeError: If the loss type is not Invariant or Partial on any axis,
+            or if the loss is untyped in strict mode.
+    """
+    loss = args[0]
+    gradient = kwargs.get("gradient", args[1] if len(args) > 1 else None)
+    if gradient is not None:
+        return
+
+    if not has_local_type(loss):
+        if _state.is_strict():
+            raise SpmdTypeError(
+                "backward() called on a loss tensor with no SPMD type "
+                "annotation. In strict mode, annotate the loss with "
+                "assert_type() before calling backward()."
+            )
+        return
+
+    for axis, typ in get_local_type(loss).items():
+        if typ is I or typ is P:
+            continue
+        axis_arg = format_axis(axis)
+        if typ is R:
+            fix = (
+                f"The loss is Replicate on axis {axis_arg} "
+                f"-- this usually means an upstream "
+                f"all_reduce reduced to R instead of I. Consider:\n"
+                f"  - Changing the upstream reduction to "
+                f"all_reduce(..., dst=I) so the loss is Invariant, or\n"
+                f"  - Removing the all_reduce entirely and "
+                f"calling backward() on the local (Partial) "
+                f"loss, which is also more efficient"
+            )
+        else:
+            # V (or any future type)
+            fix = (
+                f"The loss is Varying -- each rank holds a "
+                f"different local loss. Use "
+                f"reinterpret(loss, {axis_arg}, src=V, dst=P) "
+                f"to declare that the semantics is that you "
+                f"want to differentiate with regards to the "
+                f"(pending) reduction of the loss on all ranks"
+            )
+        raise SpmdTypeError(
+            f"backward() on a {_TYPE_FULL_NAMES[typ]} loss "
+            f"on axis {axis_arg} would produce incorrect "
+            f"gradients. The implicit grad_output is a 1.0 "
+            f"scalar on each rank (Invariant), but only "
+            f"Invariant or Partial losses are valid for "
+            f"backward() without an explicit gradient.\n"
+            f"{fix}"
+        )
+
+
 # Functions that are not tensor math -- autograd bookkeeping, metadata queries,
 # etc.  These go through __torch_function__ but should not trigger type
 # inference or strict-mode annotation checks.
@@ -2810,10 +2872,6 @@ def _infer_global_output_type(
 # get_ignored_functions() so it never reaches __torch_function__ at all.
 _PASSTHROUGH = {
     # Autograd bookkeeping
-    # TODO: Actually, backward probably can support type checking; in
-    # particular we could put annotations on all of the resulting grad
-    # tensors based on the typing of the leaf tensor.
-    torch.Tensor.backward,
     torch.Tensor.requires_grad_,
     torch.Tensor.retain_grad,
     # Metadata queries (return non-tensor values)
@@ -3126,6 +3184,19 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
         # Autograd bookkeeping, metadata queries -- not tensor math.
         if func in _PASSTHROUGH:
+            return func(*args, **kwargs)
+
+        # backward() check: validate the loss type before running backward.
+        # When no grad scaling occurs, backward() creates a 1.0 scalar
+        # grad_loss on each rank.  Only Invariant and Partial are correct:
+        #   I.backward_type() = I  (grad is Invariant -- correct)
+        #   P.backward_type() = R  (grad is Replicate -- correct)
+        # Replicate would be wrong: the 1.0-per-rank grad would be
+        # interpreted as Partial, overcounting by world_size.
+        # Varying would also be wrong: the uniform 1.0 grad does not match
+        # the varying-per-rank semantics.
+        if func is torch.Tensor.backward:
+            _check_backward_loss_type(args, kwargs)
             return func(*args, **kwargs)
 
         # Outer try/except: apply traceback filtering to SpmdTypeError.

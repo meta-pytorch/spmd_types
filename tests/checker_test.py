@@ -19,6 +19,7 @@ from spmd_types._checker import (
     get_partition_spec,
     infer_local_type_for_axis,
     mutate_type,
+    no_typecheck,
     OpLinearity,
     trace,
     typecheck,
@@ -2797,6 +2798,97 @@ class TestValidatePartitionSpecForGlobalSpmd(LocalTensorTestCase):
             with typecheck(local=False):
                 with self.assertRaises(SpmdTypeError):
                     torch.add(x, x)
+
+
+class TestBackwardTypeCheck(SpmdTypeCheckedTestCase, expecttest.TestCase):
+    """Test that backward() validates loss type is Invariant or Partial."""
+
+    def test_backward_invariant_loss_ok(self):
+        """backward() on Invariant loss should succeed."""
+        loss_i = self._generate_inputs((), self.pg, I)
+        loss_i.requires_grad_(True)
+        y = loss_i * 1.0  # I * scalar -> I
+        y.backward()
+
+    def test_backward_partial_loss_ok(self):
+        """backward() on Partial loss should succeed."""
+        x = self._generate_inputs((4,), self.pg, V)
+        x.requires_grad_(True)
+        with torch.no_grad():
+            w = self._generate_inputs((4,), self.pg, V)
+        s = (x * w).sum()  # V -> V scalar
+        from spmd_types._local import reinterpret
+
+        reinterpret(s, self.pg, src=V, dst=P).backward()
+
+    def test_backward_replicate_loss_errors(self):
+        """backward() on Replicate loss should raise SpmdTypeError."""
+        x = self._generate_inputs((4,), self.pg, R)
+        x.requires_grad_(True)
+        loss = (x * x).sum()  # R -> R
+        with self.assertRaises(SpmdTypeError) as ctx:
+            loss.backward()
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """\
+backward() on a Replicate loss on axis default_pg would produce incorrect gradients. The implicit grad_output is a 1.0 scalar on each rank (Invariant), but only Invariant or Partial losses are valid for backward() without an explicit gradient.
+The loss is Replicate on axis default_pg -- this usually means an upstream all_reduce reduced to R instead of I. Consider:
+  - Changing the upstream reduction to all_reduce(..., dst=I) so the loss is Invariant, or
+  - Removing the all_reduce entirely and calling backward() on the local (Partial) loss, which is also more efficient""",
+        )
+
+    def test_backward_varying_loss_errors(self):
+        """backward() on Varying loss should raise SpmdTypeError."""
+        x = self._generate_inputs((4,), self.pg, V)
+        x.requires_grad_(True)
+        loss = (x * x).sum()  # V -> V
+        with self.assertRaises(SpmdTypeError) as ctx:
+            loss.backward()
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """\
+backward() on a Varying loss on axis default_pg would produce incorrect gradients. The implicit grad_output is a 1.0 scalar on each rank (Invariant), but only Invariant or Partial losses are valid for backward() without an explicit gradient.
+The loss is Varying -- each rank holds a different local loss. Use reinterpret(loss, default_pg, src=V, dst=P) to declare that the semantics is that you want to differentiate with regards to the (pending) reduction of the loss on all ranks""",
+        )
+
+    def test_backward_with_explicit_gradient_skips_check(self):
+        """backward() with explicit gradient kwarg should skip the loss type check."""
+        x = self._generate_inputs((4,), self.pg, R)
+        x.requires_grad_(True)
+        loss = (x * x).sum()  # R -> R
+        grad = self._generate_inputs((), self.pg, P)
+        loss.backward(gradient=grad)
+
+    def test_backward_with_explicit_gradient_positional_skips_check(self):
+        """backward() with explicit gradient as positional arg should skip the check."""
+        x = self._generate_inputs((4,), self.pg, R)
+        x.requires_grad_(True)
+        loss = (x * x).sum()  # R -> R
+        grad = self._generate_inputs((), self.pg, P)
+        loss.backward(grad)
+
+    def test_backward_untyped_loss_strict_errors(self):
+        """backward() on untyped loss in strict mode should raise SpmdTypeError."""
+        x = self.rank_map(lambda r: torch.randn(4))
+        x.requires_grad_(True)
+        with no_typecheck():
+            loss = (x * x).sum()
+        with self.assertRaises(SpmdTypeError) as ctx:
+            loss.backward()
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """\
+backward() called on a loss tensor with no SPMD type annotation. In strict mode, annotate the loss with assert_type() before calling backward().""",
+        )
+
+    def test_backward_untyped_loss_permissive_ok(self):
+        """backward() on untyped loss in permissive mode should pass through."""
+        x = self.rank_map(lambda r: torch.randn(4))
+        x.requires_grad_(True)
+        with no_typecheck():
+            loss = (x * x).sum()
+        with typecheck(strict_mode="permissive"):
+            loss.backward()
 
 
 if __name__ == "__main__":
