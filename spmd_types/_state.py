@@ -50,6 +50,9 @@ def current_mesh() -> frozenset[MeshAxis] | None:
 
 
 def _push_mesh(mesh: frozenset[MeshAxis]) -> None:
+    assert all(ax.size() > 1 for ax in mesh), (
+        f"mesh must not contain size-1 axes, got {mesh}"
+    )
     if not hasattr(_tls, "mesh_stack"):
         _tls.mesh_stack = []
     _tls.mesh_stack.append(mesh)

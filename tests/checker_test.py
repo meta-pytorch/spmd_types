@@ -2407,6 +2407,59 @@ class TestSingletonAxisStrictMode(expecttest.TestCase):
         self.assertIs(get_axis_local_type(result, self.real), P)
 
 
+class TestSingletonAxisInMeshFiltered(expecttest.TestCase):
+    """_push_mesh rejects size-1 axes; callers must filter them out.
+
+    The contract: callers (e.g. utils_spmd.push_mesh) must drop trivial
+    (size-1) mesh axes before calling _push_mesh.  _push_mesh asserts
+    this invariant so that the checker never sees size-1 axes (which
+    would cause spurious strict-mode errors for tensors not annotated
+    on the trivial dimension).
+    """
+
+    WORLD_SIZE = 8
+
+    @classmethod
+    def setUpClass(cls):
+        from spmd_types._testing import fake_pg
+
+        super().setUpClass()
+        cls._pg_ctx = fake_pg(cls.WORLD_SIZE)
+        cls._pg_ctx.__enter__()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._pg_ctx.__exit__(None, None, None)
+        super().tearDownClass()
+
+    def test_push_mesh_rejects_size1_axes(self):
+        """_push_mesh must raise AssertionError if given a size-1 axis."""
+        from spmd_types._state import _push_mesh
+
+        trivial = MeshAxis.of(1, 8)  # size=1
+        real = MeshAxis.of(self.WORLD_SIZE, 1)
+
+        with self.assertRaises(AssertionError):
+            _push_mesh(frozenset({trivial, real}))
+
+    def test_filtered_mesh_works_with_type_checker(self):
+        """When size-1 axes are filtered out, type checking works normally."""
+        from spmd_types._state import _pop_mesh, _push_mesh
+
+        real_axis = MeshAxis.of(self.WORLD_SIZE, 1)
+        # Only push the non-trivial axis (as callers are required to do).
+        _push_mesh(frozenset({real_axis}))
+        try:
+            with typecheck():
+                x = torch.randn(4)
+                assert_type(x, {real_axis: V})
+                # This must not raise -- no size-1 axis in the mesh.
+                y = x >= 0
+                self.assertIs(get_axis_local_type(y, real_axis), V)
+        finally:
+            _pop_mesh()
+
+
 class TestMissingAxesValidation(SpmdTypeCheckedTestCase):
     """Test that missing mesh axes are rejected at shard propagation time."""
 
