@@ -115,6 +115,23 @@ class TestMeshAxis(unittest.TestCase):
                 "MeshAxis((3, 2):(4, 1))",
             )
 
+    def test_repr_trivial_unnamed(self) -> None:
+        """Size-1 axis without names shows MeshAxis(trivial)."""
+        trivial = MeshAxis.of(1, 1)
+        with set_printoptions(debug=False):
+            self.assertEqual(repr(trivial), "MeshAxis(trivial)")
+        with set_printoptions(debug=True):
+            self.assertEqual(repr(trivial), "MeshAxis(trivial){1:1}")
+
+    def test_repr_trivial_named(self) -> None:
+        """Size-1 axis with a name shows name(trivial)."""
+        trivial = MeshAxis.of(1, 1)
+        _register_name(trivial, "TP")
+        with set_printoptions(debug=False):
+            self.assertEqual(repr(trivial), "TP(trivial)")
+        with set_printoptions(debug=True):
+            self.assertEqual(repr(trivial), "TP(trivial){1:1}")
+
     def test_repr_with_names(self) -> None:
         from spmd_types._mesh_axis import _register_name
 

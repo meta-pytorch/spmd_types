@@ -149,21 +149,28 @@ class MeshAxis:
 
     def __repr__(self) -> str:
         names = _mesh_axis_names.get(self)
+        trivial = self.size() == 1
         if _debug_repr:
             layout = self._layout_str()
+            tag = "(trivial)" if trivial else ""
             if names:
                 name_str = "/".join(sorted(names))
-                return f"{name_str}{{{layout}}}"
+                return f"{name_str}{tag}{{{layout}}}"
             inferred = _infer_flattened_name(self)
             if inferred is not None:
-                return f"{inferred}{{{layout}}}"
+                return f"{inferred}{tag}{{{layout}}}"
+            if trivial:
+                return f"MeshAxis(trivial){{{layout}}}"
             return f"MeshAxis({layout})"
         else:
             if names:
-                return _best_name(names)
+                name = _best_name(names)
+                return f"{name}(trivial)" if trivial else name
             inferred = _infer_flattened_name(self)
             if inferred is not None:
-                return inferred
+                return f"{inferred}(trivial)" if trivial else inferred
+            if trivial:
+                return "MeshAxis(trivial)"
             return f"MeshAxis({self._layout_str()})"
 
     # -- Construction helpers ----------------------------------------------
