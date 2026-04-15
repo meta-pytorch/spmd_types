@@ -492,6 +492,25 @@ class TestAssertTypeRefinement(LocalTensorTestCase):
         self.assertIs(get_axis_local_type(x, self.tp), V)
 
 
+class TestAssertTypeVtoP(LocalTensorTestCase):
+    """Test that assert_type can transmute V -> P implicitly."""
+
+    def test_v_then_p_transmutes(self):
+        """assert_type({TP: P}) on a V tensor should transmute V to P."""
+        x = self.rank_map(lambda r: torch.randn(4))
+        assert_type(x, {self.pg: V})
+        # V -> P should be allowed as an implicit transmute.
+        assert_type(x, {self.pg: P})
+        self.assertIs(get_axis_local_type(x, self.pg), P)
+
+    def test_p_then_v_rejected(self):
+        """assert_type({TP: V}) on a P tensor should still be rejected."""
+        x = self.rank_map(lambda r: torch.randn(4))
+        assert_type(x, {self.pg: P})
+        with self.assertRaises(SpmdTypeError):
+            assert_type(x, {self.pg: V})
+
+
 class TestAssertTypeBareExpansion(LocalTensorTestCase):
     """Test assert_type with bare R/V (PerMeshAxisLocalSpmdType) expansion."""
 

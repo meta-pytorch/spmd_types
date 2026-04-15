@@ -665,6 +665,12 @@ def assert_type(  # noqa: C901
         if axis in existing_local:
             existing_typ = existing_local[axis]
             if existing_typ != typ:
+                # Allow implicit transmute: V -> P.  Both are "varying per
+                # rank" locally; P just adds the semantic that the values are
+                # partial sums awaiting reduction.  Silently overwrite.
+                if existing_typ is V and typ is P:
+                    existing_local[axis] = typ
+                    continue
                 raise SpmdTypeError(
                     f"SPMD type mismatch on axis {format_axis(axis)}: "
                     f"tensor has {existing_typ}, expected {typ}"
