@@ -2025,9 +2025,8 @@ class TestTraceMode(SpmdTypeCheckedTestCase, expecttest.TestCase):
         self.assertExpectedInline(
             self._trace_output(),
             """\
-checker_test.py:N  assert_type({}) -> {default_pg: R}
-checker_test.py:N  assert_type({}) -> {default_pg: V}
-checker_test.py:N  add({default_pg: R}, {default_pg: V}) -> {default_pg: V}""",
+runtime.py:N  assert_type({}) -> {default_pg: R}
+runtime.py:N  assert_type({}) -> {default_pg: V}""",
         )
 
     def test_trace_logs_multiple_ops(self):
@@ -2041,10 +2040,8 @@ checker_test.py:N  add({default_pg: R}, {default_pg: V}) -> {default_pg: V}""",
         self.assertExpectedInline(
             self._trace_output(),
             """\
-checker_test.py:N  assert_type({}) -> {default_pg: R}
-checker_test.py:N  assert_type({}) -> {default_pg: V}
-checker_test.py:N  add({default_pg: R}, {default_pg: V}) -> {default_pg: V}
-checker_test.py:N  mul({default_pg: V}, {default_pg: V}) -> {default_pg: V}""",
+runtime.py:N  assert_type({}) -> {default_pg: R}
+runtime.py:N  assert_type({}) -> {default_pg: V}""",
         )
 
     def test_trace_silent_when_disabled(self):
@@ -2064,9 +2061,7 @@ checker_test.py:N  mul({default_pg: V}, {default_pg: V}) -> {default_pg: V}""",
 
         self.assertExpectedInline(
             self._trace_output(),
-            """\
-checker_test.py:N  assert_type({}) -> {default_pg: P}
-checker_test.py:N  all_reduce({default_pg: P}) -> {default_pg: R}""",
+            """runtime.py:N  assert_type({}) -> {default_pg: P}""",
         )
 
     def test_trace_logs_assert_type_initial(self):
@@ -2077,7 +2072,7 @@ checker_test.py:N  all_reduce({default_pg: P}) -> {default_pg: R}""",
 
         self.assertExpectedInline(
             self._trace_output(),
-            """checker_test.py:N  assert_type({}) -> {default_pg: R}""",
+            """runtime.py:N  assert_type({}) -> {default_pg: R}""",
         )
 
     def test_trace_logs_assert_type_refinement(self):
@@ -2088,7 +2083,7 @@ checker_test.py:N  all_reduce({default_pg: P}) -> {default_pg: R}""",
 
         self.assertExpectedInline(
             self._trace_output(),
-            """checker_test.py:N  assert_type({default_pg: R}) -> {default_pg: R}""",
+            """runtime.py:N  assert_type({default_pg: R}) -> {default_pg: R}""",
         )
 
     def test_trace_omits_all_empty_types(self):

@@ -109,7 +109,7 @@ class TestModeTracebackhide(SpmdTypeCheckedTestCase):
                 current = tb
                 found_hidden = False
                 while current is not None:
-                    if "_checker.py" in current.tb_frame.f_code.co_filename:
+                    if "_checker" in current.tb_frame.f_code.co_filename:
                         if current.tb_frame.f_locals.get("__tracebackhide__"):
                             found_hidden = True
                     current = current.tb_next
@@ -355,7 +355,7 @@ class TestEndToEnd(SpmdTypeCheckedTestCase):
         self.assertIn("SpmdTypeError", formatted)
         # With filtering off, deep internal frames should be visible.
         self.assertIn("_typecheck_core", formatted)
-        self.assertIn("_checker.py", formatted)
+        self.assertIn("_checker", formatted)
         # No filtering note.
         self.assertNotIn("SPMD_TYPES_TRACEBACK_FILTERING=off", formatted)
 

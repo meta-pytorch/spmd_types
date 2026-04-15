@@ -3,18 +3,11 @@ from __future__ import annotations
 
 import spmd_types._dtensor_checker as _dtensor_checker  # noqa: F401
 
-# Collectives and operations
+# These still require _checker (the type inference engine)
 from spmd_types._checker import (  # noqa: F401
     _SpmdTypeBackwardCompatibleMode as SpmdTypeMode,
-    assert_local_type,
-    assert_type,
     is_type_checking,
-    mutate_type,
     no_typecheck,
-    register_autograd_function,
-    register_local_autograd_function,
-    reinterpret_mesh,
-    trace,
     typecheck,
 )
 from spmd_types._collectives import (  # noqa: F401
@@ -39,6 +32,9 @@ from spmd_types._local import (  # noqa: F401
 )
 from spmd_types._mesh import set_current_mesh  # noqa: F401
 from spmd_types._mesh_axis import MeshAxis  # noqa: F401
+
+# reinterpret_mesh lives in its own module
+from spmd_types._reinterpret_mesh import reinterpret_mesh  # noqa: F401
 from spmd_types._scalar import Scalar  # noqa: F401
 from spmd_types._state import current_mesh  # noqa: F401
 from spmd_types._traceback import traceback_filtering  # noqa: F401
@@ -46,6 +42,16 @@ from spmd_types._type_attr import (  # noqa: F401
     get_axis_local_type,
     get_local_type,
     maybe_get_axis_local_type,
+)
+
+# Collectives and operations -- runtime API (no _checker dependency)
+from spmd_types.runtime import (  # noqa: F401
+    assert_local_type,
+    assert_type,
+    mutate_type,
+    register_autograd_function,
+    register_local_autograd_function,
+    trace,
 )
 
 # Types
