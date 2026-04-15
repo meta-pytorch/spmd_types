@@ -17,6 +17,7 @@ need the annotation APIs.
 
 from __future__ import annotations
 
+import builtins
 import logging
 import os
 from contextlib import contextmanager
@@ -274,38 +275,22 @@ def _update_axis_in_partition_spec(  # noqa: C901
 # =============================================================================
 
 
-@overload
-def assert_type(
-    tensor: torch.Tensor,
-    type: LocalSpmdType,
-    partition_spec: PartitionSpec | None = ...,
-) -> torch.Tensor: ...
-
-
-@overload
-def assert_type(
-    tensor: torch.Tensor,
-    type: PerMeshAxisSpmdTypes,
-) -> torch.Tensor: ...
-
-
-@overload
-def assert_type(
-    tensor: torch.Tensor,
-    type: PerMeshAxisLocalSpmdType,
-) -> torch.Tensor: ...
+_TensorOrSequence = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 
 
 @api_boundary
 def assert_type(  # noqa: C901
-    tensor: torch.Tensor,
+    tensor: _TensorOrSequence,
     type: PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType,
     partition_spec: PartitionSpec | None = None,
-) -> torch.Tensor:
-    """Assert or set the SPMD type on a tensor.
+) -> _TensorOrSequence:
+    """Assert or set the SPMD type on a tensor or sequence of tensors.
 
     If the tensor has no SPMD type, sets it. If the tensor already has an SPMD
     type, checks compatibility using refinement semantics (see below).
+
+    When ``tensor`` is a list or tuple, applies ``assert_type`` to each element
+    and returns a collection of the same type.
 
     Three calling conventions (see overloads):
 
@@ -371,6 +356,10 @@ def assert_type(  # noqa: C901
             PartitionSpec info.
         SpmdTypeError: If existing local SPMD type doesn't match.
     """
+    if isinstance(tensor, (list, tuple)):
+        result = [assert_type(t, type, partition_spec) for t in tensor]
+        return builtins.type(tensor)(result)
+
     if isinstance(tensor, DTensor):
         raise TypeError(
             "assert_type() does not support DTensor. SPMD type checking "
