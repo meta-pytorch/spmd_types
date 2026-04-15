@@ -116,12 +116,6 @@ _FIX_CANDIDATES: list[
     ),
     (
         I,
-        V,
-        "reinterpret(tensor, {axis_arg}, src=I, dst=V)",
-        "no-op forward, all-reduce in backward",
-    ),
-    (
-        I,
         P,
         "convert(tensor, {axis_arg}, src=I, dst=P)",
         "zeros non-rank-0 in forward, no-op backward",

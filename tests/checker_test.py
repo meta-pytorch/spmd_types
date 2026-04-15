@@ -576,7 +576,7 @@ Are you missing a collective or a reinterpret/convert call? e.g.,
         )
 
     def test_general_I_V(self):
-        """I + V: suggest reinterpret I->R or I->V."""
+        """I + V: suggest convert I->R."""
         with self.assertRaises(SpmdTypeError) as ctx:
             infer_local_type_for_axis(self.tp, [I, V])
         self.assertExpectedInline(
@@ -584,8 +584,7 @@ Are you missing a collective or a reinterpret/convert call? e.g.,
             """\
 Invariant type on axis mesh_tp cannot mix with other types. Found types: [I, V]
 Are you missing a collective or a reinterpret/convert call? e.g.,
-  convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)
-  reinterpret(tensor, mesh_tp, src=I, dst=V) on the Invariant operand (no-op forward, all-reduce in backward)""",
+  convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)""",
         )
 
     def test_general_I_P(self):
@@ -637,7 +636,7 @@ Are you missing a collective or a reinterpret/convert call? e.g.,
         )
 
     def test_general_I_R_V(self):
-        """I + R + V: suggest reinterpret I->R or I->V."""
+        """I + R + V: suggest convert I->R."""
         with self.assertRaises(SpmdTypeError) as ctx:
             infer_local_type_for_axis(self.tp, [I, R, V])
         self.assertExpectedInline(
@@ -645,8 +644,7 @@ Are you missing a collective or a reinterpret/convert call? e.g.,
             """\
 Invariant type on axis mesh_tp cannot mix with other types. Found types: [I, R, V]
 Are you missing a collective or a reinterpret/convert call? e.g.,
-  convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)
-  reinterpret(tensor, mesh_tp, src=I, dst=V) on the Invariant operand (no-op forward, all-reduce in backward)""",
+  convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)""",
         )
 
     def test_mul_P_P(self):
