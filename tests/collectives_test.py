@@ -222,10 +222,12 @@ class TestReduceScatter(LocalTensorTestCase):
         # Each rank has [A_r, B_r, C_r] where total length is world_size * chunk_size
         chunk_size = 2
         x = self.rank_map(
-            lambda r: torch.arange(
-                self.WORLD_SIZE * chunk_size, dtype=torch.float
-            ).reshape(self.WORLD_SIZE, chunk_size)
-            + r
+            lambda r: (
+                torch.arange(self.WORLD_SIZE * chunk_size, dtype=torch.float).reshape(
+                    self.WORLD_SIZE, chunk_size
+                )
+                + r
+            )
         )
         assert_type(x, {self.pg: P})
 
@@ -368,8 +370,9 @@ class TestAllToAllUneven(LocalTensorTestCase):
     def _make_input(self, total, D):
         """Create a V-typed input of shape (total, D) with deterministic data."""
         x = self.mode.rank_map(
-            lambda r: torch.arange(total * D, dtype=torch.float).reshape(total, D)
-            + r * 100
+            lambda r: (
+                torch.arange(total * D, dtype=torch.float).reshape(total, D) + r * 100
+            )
         )
         assert_type(x, {self.pg: V})
         return x

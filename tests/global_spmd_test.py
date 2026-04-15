@@ -1120,9 +1120,9 @@ class TestGlobalSpmdBackwardGroundTruth(GlobalSpmdTestCase):
             (torch.neg, [(6, 3)], [S(0)]),
             (torch.relu, [(6, 3)], [S(0)]),
         ],
-        name_fn=lambda op,
-        shapes,
-        types: f"{op.__name__}_{'_'.join(t.name if hasattr(t, 'name') else str(t) for t in types)}",
+        name_fn=lambda op, shapes, types: (
+            f"{op.__name__}_{'_'.join(t.name if hasattr(t, 'name') else str(t) for t in types)}"
+        ),
     )
     def test_op(self, op, shapes, types):
         inputs = [self._make_input(s, self.tp, t) for s, t in zip(shapes, types)]
