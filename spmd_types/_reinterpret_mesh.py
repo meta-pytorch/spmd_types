@@ -9,7 +9,7 @@ inference engine) do not invalidate downstream targets that only need
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Callable, NamedTuple
 
 import torch
@@ -32,6 +32,7 @@ from spmd_types.types import (
     PerMeshAxisSpmdTypes,
     SpmdTypeError,
 )
+from torch.distributed.device_mesh import DeviceMesh
 
 # =============================================================================
 # Error formatting helpers (moved from _checker.py)
@@ -200,13 +201,18 @@ def _format_operator_context(
 @api_boundary
 def reinterpret_mesh(
     tensor: torch.Tensor,
-    type: PerMeshAxisSpmdTypes,
+    type: PerMeshAxisSpmdTypes | frozenset[MeshAxis] | DeviceMesh | Sequence,
+    *,
+    inplace: bool = False,
 ) -> torch.Tensor:
     """Explicitly reinterpret a tensor onto a cross-mesh-compatible local type.
 
     This is a no-op on the underlying tensor data. It only retags the tensor
     with a new local SPMD type after verifying the source and destination mesh
     presentations are compatible under one-hop grouping.
+
+    When *type* specifies axes only (frozenset, DeviceMesh, or Sequence of
+    ProcessGroups), destination types are derived from the source tensor.
     """
     if not has_local_type(tensor):
         raise SpmdTypeError(
@@ -218,21 +224,26 @@ def reinterpret_mesh(
             "Cross-mesh reinterpretation is currently local-SPMD-only."
         )
 
+    from spmd_types._mesh import _resolve_axes
     from spmd_types._mesh_region import check_reinterpret_mesh_compatible
 
+    if isinstance(type, dict):
+        dst = _validate(type)
+    else:
+        dst = _resolve_axes(type)
+
     src_type = get_local_type(tensor)
-    dst_type = _validate(type)
-    compat = check_reinterpret_mesh_compatible(src_type, dst_type)
+    compat = check_reinterpret_mesh_compatible(src_type, dst)
     if isinstance(compat, str):
         context = _format_operator_context(
             reinterpret_mesh,
-            [_RawArgEntry(None, tensor), _RawArgEntry(None, dst_type)],
+            [_RawArgEntry(None, tensor), _RawArgEntry(None, dst)],
             mesh=current_mesh(),
         )
         raise SpmdTypeError(compat, context=context)
 
-    result = torch.ops.aten.alias.default(tensor)
-    _set_local_type_raw(result, dst_type)
+    result = tensor if inplace else torch.ops.aten.alias.default(tensor)
+    _set_local_type_raw(result, compat)
     if _TRACE:
-        _trace_op(reinterpret_mesh, [src_type], dst_type)
+        _trace_op(reinterpret_mesh, [src_type], compat)
     return result

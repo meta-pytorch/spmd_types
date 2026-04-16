@@ -2760,6 +2760,54 @@ Source group {mesh_tp} and destination group {mesh_ep} flatten to different rank
                 """reinterpret_mesh does not support tensors carrying PartitionSpec. Cross-mesh reinterpretation is currently local-SPMD-only.""",
             )
 
+    def test_reinterpret_mesh_axes_only_flatten_unflatten(self) -> None:
+        """axes-only reinterpret_mesh: dp,cp -> dp_cp derives types from source."""
+        from spmd_types._checker import reinterpret_mesh
+
+        with typecheck(strict_mode="strict"):
+            x = torch.randn(4)
+            assert_type(x, {self.dp: R, self.cp: R})
+            y = reinterpret_mesh(x, [self.dp_cp])
+            self.assertIs(get_axis_local_type(y, self.dp_cp), R)
+
+    def test_reinterpret_mesh_axes_only_parallel_folding(self) -> None:
+        """axes-only reinterpret_mesh: dp,cp,tp -> edp,ep,etp derives V from source."""
+        from spmd_types._checker import reinterpret_mesh
+
+        with typecheck(strict_mode="strict"):
+            expert_mesh = init_device_mesh(
+                "cpu", (4, 2, 2), mesh_dim_names=("edp", "ep", "etp")
+            )
+            edp = expert_mesh.get_group("edp")
+            ep = expert_mesh.get_group("ep")
+            etp = expert_mesh.get_group("etp")
+
+            x = torch.randn(4)
+            assert_type(x, {self.dp: V, self.cp: V, self.tp: V})
+            y = reinterpret_mesh(x, [edp, ep, etp])
+            self.assertIs(get_axis_local_type(y, edp), V)
+            self.assertIs(get_axis_local_type(y, ep), V)
+            self.assertIs(get_axis_local_type(y, etp), V)
+
+    def test_reinterpret_mesh_axes_only_rejects_mixed_types(self) -> None:
+        """axes-only reinterpret_mesh rejects I/V mismatch within a flattened group."""
+        from spmd_types._checker import reinterpret_mesh
+
+        with typecheck(strict_mode="strict"):
+            x = torch.randn(4)
+            assert_type(x, {self.dp: V, self.cp: I})
+            self.assertExpectedRaisesInline(
+                SpmdTypeError,
+                lambda: reinterpret_mesh(x, [self.dp_cp]),
+                """\
+Axes {mesh_dp, mesh_cp} would need to be flattened, but mesh_dp has type V while mesh_cp has type I. Check that the operand has the local SPMD types you expect and that the current mesh is correct for this region of code.
+
+  In reinterpret_mesh(
+    tensor: f32[4] {mesh_dp: V, mesh_cp: I},
+    type: frozenset({mesh_dp_cp}),
+  )""",
+            )
+
 
 class TestValidatePartitionSpecForGlobalSpmd(LocalTensorTestCase):
     """Test _validate_partition_spec_for_global_spmd bidirectional consistency."""
