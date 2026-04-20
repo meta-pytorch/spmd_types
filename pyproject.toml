@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spmd_types"
-version = "0.1.1"
+version = "0.2.0"
 description = "A type system for distributed (SPMD) tensor computations in PyTorch"
 readme = "README.md"
 license = {file = "LICENSE"}
