@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Helpers for explicit cross-mesh compatibility on local SPMD types.
 
 This module supports the two mesh-compatibility cases used by explicit mesh

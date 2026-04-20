@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """Monkey-patch torch.func.vmap to propagate SPMD type annotations.
 
 vmap wraps input tensors as C++-level BatchedTensors, which drops Python

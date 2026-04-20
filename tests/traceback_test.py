@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Tests for JAX-style traceback filtering on SpmdTypeError.
 
@@ -144,10 +150,7 @@ class TestModeQuietRemoveFrames(SpmdTypeCheckedTestCase):
                     0,
                     f"quiet_remove_frames should strip deep internals, found: {deep_internal}",
                 )
-                # Should have a note about filtering
-                self.assertTrue(hasattr(e, "__notes__"))
-                notes = " ".join(e.__notes__)
-                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", notes)
+                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", str(e))
 
     def test_quiet_remove_frames_hides_filter_helper(self):
         with traceback_filtering("quiet_remove_frames"):
@@ -232,15 +235,12 @@ class TestNestingGuard(SpmdTypeCheckedTestCase):
                 outer()
                 self.fail("Expected SpmdTypeError")
             except SpmdTypeError as e:
-                # Should have exactly one note (not two)
-                notes = getattr(e, "__notes__", [])
-                filter_notes = [
-                    n for n in notes if "SPMD_TYPES_TRACEBACK_FILTERING" in n
-                ]
+                msg = str(e)
+                count = msg.count("SPMD_TYPES_TRACEBACK_FILTERING=off")
                 self.assertEqual(
-                    len(filter_notes),
+                    count,
                     1,
-                    f"Expected exactly 1 filter note, got {len(filter_notes)}",
+                    f"Expected exactly 1 filter note, got {count}",
                 )
 
 
@@ -279,10 +279,7 @@ class TestAssertTypeApiB(SpmdTypeCheckedTestCase):
                 assert_type(x, {self.pg: V})
                 self.fail("Expected SpmdTypeError")
             except SpmdTypeError as e:
-                # Should have a note about filtering
-                self.assertTrue(hasattr(e, "__notes__"))
-                notes = " ".join(e.__notes__)
-                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", notes)
+                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", str(e))
 
 
 class TestMutateTypeApiB(SpmdTypeCheckedTestCase):
@@ -295,10 +292,7 @@ class TestMutateTypeApiB(SpmdTypeCheckedTestCase):
                 mutate_type(x, self.pg, src=V, dst=P)
                 self.fail("Expected SpmdTypeError")
             except SpmdTypeError as e:
-                # Should have a note about filtering
-                self.assertTrue(hasattr(e, "__notes__"))
-                notes = " ".join(e.__notes__)
-                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", notes)
+                self.assertIn("SPMD_TYPES_TRACEBACK_FILTERING=off", str(e))
 
 
 class TestEndToEnd(SpmdTypeCheckedTestCase):

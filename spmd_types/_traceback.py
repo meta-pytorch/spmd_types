@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """JAX-style traceback filtering for SPMD type errors.
 
 When ``SPMD_TYPES_TRACEBACK_FILTERING`` is set (default ``"auto"``), internal
@@ -138,10 +144,8 @@ def _filter_and_reraise(e: SpmdTypeError) -> None:  # noqa: C901
         wrapper.__traceback__ = tb
         e.__cause__ = wrapper
 
-    # Add a note about filtering
-    e.add_note(
-        "Set SPMD_TYPES_TRACEBACK_FILTERING=off to see the full, unfiltered traceback."
-    )
+    note = "\n\nSet SPMD_TYPES_TRACEBACK_FILTERING=off to see the full, unfiltered traceback."
+    e.args = (e.args[0] + note,) + e.args[1:]
 
     e.__traceback__ = filtered_tb
 

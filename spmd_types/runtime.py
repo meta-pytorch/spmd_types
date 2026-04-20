@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Lightweight runtime API for SPMD type annotations.
 
@@ -21,7 +27,6 @@ import builtins
 import logging
 import os
 from contextlib import contextmanager
-from typing import overload
 
 import torch
 from spmd_types._frame import _get_user_frame

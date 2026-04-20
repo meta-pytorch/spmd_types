@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Tests for global SPMD shard propagation: propagating S(i) through torch ops.
 
@@ -1083,7 +1089,9 @@ class TestGlobalSpmdBackwardGroundTruth(GlobalSpmdTestCase):
         # The global tensors are non-distributed (no ranks, no sharding),
         # so collectives like redistribute are meaningless — we stub them
         # as identity.
-        _noop = lambda x, *a, **kw: x
+        def _noop(x, *a, **kw):
+            return x
+
         _mod = type(self).__module__
         with (
             no_typecheck(),

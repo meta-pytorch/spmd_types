@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 SPMD type checking logic and tensor type tracking.
 
@@ -17,7 +23,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import auto, Enum
-from typing import Callable, Literal, NamedTuple, Optional, overload
+from typing import Callable, Literal, NamedTuple, Optional
 
 import torch
 import torch.overrides
