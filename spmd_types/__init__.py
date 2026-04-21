@@ -7,15 +7,6 @@
 # spmd_types package
 from __future__ import annotations
 
-import spmd_types._dtensor_checker as _dtensor_checker  # noqa: F401
-
-# These still require _checker (the type inference engine)
-from spmd_types._checker import (  # noqa: F401
-    _SpmdTypeBackwardCompatibleMode as SpmdTypeMode,
-    is_type_checking,
-    no_typecheck,
-    typecheck,
-)
 from spmd_types._collectives import (  # noqa: F401
     all_gather,
     all_reduce,
@@ -42,7 +33,11 @@ from spmd_types._mesh_axis import MeshAxis  # noqa: F401
 # reinterpret_mesh lives in its own module
 from spmd_types._reinterpret_mesh import reinterpret_mesh  # noqa: F401
 from spmd_types._scalar import Scalar  # noqa: F401
-from spmd_types._state import current_mesh  # noqa: F401
+from spmd_types._state import (  # noqa: F401
+    current_mesh,
+    is_type_checking,
+    no_typecheck,
+)
 from spmd_types._traceback import traceback_filtering  # noqa: F401
 from spmd_types._type_attr import (  # noqa: F401
     get_axis_local_type,

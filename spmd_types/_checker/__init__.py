@@ -2789,19 +2789,7 @@ def typecheck(
                 _set_current_mode(None)
 
 
-@contextmanager
-def no_typecheck():
-    """Temporarily disable type checking on this thread (like ``no_grad``)."""
-    mode = _current_mode()
-    if mode is not None:
-        old_disabled = mode._disabled
-        mode._disabled = True
-        try:
-            yield
-        finally:
-            mode._disabled = old_disabled
-    else:
-        yield
+from spmd_types._state import no_typecheck  # noqa: F401
 
 
 class _SpmdTypeBackwardCompatibleMode:

@@ -17,6 +17,7 @@ C++ thread-local storage (PythonTorchFunctionTLS), so modes are per-thread.
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,6 +30,21 @@ def is_type_checking() -> bool:
     """Return True if type checking is active and not paused on this thread."""
     mode = _current_mode()
     return mode is not None and not mode._disabled
+
+
+@contextmanager
+def no_typecheck():
+    """Temporarily disable type checking on this thread (like ``no_grad``)."""
+    mode = _current_mode()
+    if mode is not None:
+        old_disabled = mode._disabled
+        mode._disabled = True
+        try:
+            yield
+        finally:
+            mode._disabled = old_disabled
+    else:
+        yield
 
 
 def _current_mode():
