@@ -535,6 +535,23 @@ def assert_local_type(tensor: torch.Tensor, type: PerMeshAxisSpmdTypes) -> torch
     return assert_type(tensor, type)
 
 
+def assert_type_like(
+    tensor: torch.Tensor,
+    source: torch.Tensor,
+    overrides: dict[MeshAxis, LocalSpmdType] | None = None,
+) -> None:
+    """Assert that *tensor* has the same SPMD type as *source*, with overrides.
+
+    Analogous to ``torch.ones_like``: copies the type from *source* then
+    applies *overrides* on top.  Useful for collective outputs where only
+    one axis changes::
+
+        assert_type_like(out, x, {mesh.CP: R})
+    """
+    full_type = {**get_local_type(source), **(overrides or {})}
+    assert_type(tensor, full_type)
+
+
 # =============================================================================
 # mutate_type
 # =============================================================================

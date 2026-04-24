@@ -2351,6 +2351,12 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
         _vmap.install()
 
+        # Patch nn.Module backward-hook plumbing so registered hooks get
+        # SPMD type propagation (and unregistered ones raise).
+        import spmd_types._backward_hooks as _backward_hooks
+
+        _backward_hooks.install()
+
         return super().__enter__()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -2360,6 +2366,10 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         import spmd_types._vmap as _vmap
 
         _vmap.uninstall()
+
+        import spmd_types._backward_hooks as _backward_hooks
+
+        _backward_hooks.uninstall()
 
         return result
 

@@ -7,6 +7,9 @@
 # spmd_types package
 from __future__ import annotations
 
+from spmd_types._backward_hooks import (  # noqa: F401
+    register_local_backward_hook,
+)
 from spmd_types._collectives import (  # noqa: F401
     all_gather,
     all_reduce,
@@ -49,6 +52,7 @@ from spmd_types._type_attr import (  # noqa: F401
 from spmd_types.runtime import (  # noqa: F401
     assert_local_type,
     assert_type,
+    assert_type_like,
     mutate_type,
     register_autograd_function,
     register_local_autograd_function,
