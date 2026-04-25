@@ -33,6 +33,8 @@ DO NOT USE THESE AGENTS FOR THIS PROJECT, IT IS ACTIVELY COUNTERPRODUCTIVE.
 
 ## Import rules
 
+Never use `set_local_type` directly (from `_type_attr`). Use `assert_type` instead -- it sets the type if the tensor has none, or checks consistency if it already has one. For DTensors, annotate the `_local_tensor` only; do not annotate the DTensor wrapper itself.
+
 Do **not** import `torch.distributed as dist` in runtime modules. Instead:
 
 ```python
@@ -58,6 +60,25 @@ Suppress FLAKE8 C901 (function too complex) warnings with `# noqa: C901` on the 
 ## Markdown
 
 All fenced code blocks in markdown files must have a language tag. Use `python` for Python code, `bash` for shell commands, and `text` for tables, pseudo-code, or plain text blocks.
+
+## Registering PyTorch-internal autograd functions
+
+When a PyTorch-internal `torch.autograd.Function` subclass needs SPMD type
+annotations, register it at module level in `_checker.py` (at the bottom of
+the file, alongside `_ToTorchTensor`, `_FromTorchTensor`, and
+`_NoopSaveInputs`).  Do NOT register them inside test functions or user code
+-- they are PyTorch internals and belong with the other PyTorch native
+registrations.
+
+- Use `register_local_autograd_function(cls)` for ops that do NOT communicate
+  (no collectives). The type checker infers output types from input types using
+  the standard non-comms typing rules.
+- Use `register_autograd_function(cls)` with a `typecheck_forward` staticmethod
+  for ops that DO communicate (internal collectives like all-gather, all-reduce).
+  The `typecheck_forward` must validate input types, run the op under
+  `no_typecheck()`, and stamp the correct output type.
+- Guard with `getattr(..., None)` if the class may not exist in all PyTorch
+  versions.
 
 ## Testing
 

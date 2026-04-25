@@ -179,6 +179,7 @@ class _AllGatherStack(torch.autograd.Function):
         ctx.dst = dst
         ctx.gather_dim = gather_dim
         pg = axis
+        x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
         gathered = [torch.empty_like(x) for _ in range(world_size)]
         _dist.dist.all_gather(gathered, x, group=pg)
@@ -208,6 +209,7 @@ class _AllGatherShard(torch.autograd.Function):
         ctx.dst = dst
         ctx.gather_dim = gather_dim
         pg = axis
+        x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
         gathered = [torch.empty_like(x) for _ in range(world_size)]
         _dist.dist.all_gather(gathered, x, group=pg)
@@ -243,6 +245,7 @@ class _AllGatherUneven(torch.autograd.Function):
         ctx.split_sizes = split_sizes
         pg = axis
         ctx.rank = _dist.dist.get_rank(pg)
+        x = x.contiguous()
         gathered = []
         for s in split_sizes:
             shape = list(x.shape)
