@@ -874,6 +874,7 @@ class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):
             ("reshape", lambda t: torch.reshape(t, (6,))),
             ("Tensor.view", lambda t: t.view(6)),
             ("transpose", lambda t: torch.transpose(t, 0, 1)),
+            ("Tensor.T", lambda t: t.T),
             ("squeeze", lambda t: torch.squeeze(t.unsqueeze(0))),
             ("unsqueeze", lambda t: torch.unsqueeze(t, 0)),
             ("flatten", lambda t: torch.flatten(t)),
@@ -887,6 +888,22 @@ class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):
                 P,
                 f"{name} did not preserve P type",
             )
+
+    def test_tensor_T_property_preserves_v(self):
+        """Tensor.T (property descriptor, not method) should preserve type.
+
+        Regression: ``.T`` is a property accessor that bypasses
+        ``__torch_function__`` in some PyTorch versions, causing the
+        SPMD type to be silently dropped. ``.transpose()`` propagates
+        correctly; ``.T`` should match.
+        """
+        x = self._generate_inputs((2, 3), self.pg, V)
+        result = x.T
+        self.assertIs(
+            get_axis_local_type(result, self.pg),
+            V,
+            "Tensor.T property did not preserve V type",
+        )
 
     def test_neg_preserves_p(self):
         """torch.neg(P) and -P (unary neg operator) should both give P."""

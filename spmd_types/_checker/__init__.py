@@ -899,6 +899,12 @@ _OP_REGISTRY: dict[Callable, _OpSpec] = {
     torch.transpose: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.Tensor.transpose: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.Tensor.transpose_: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.T.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.mT.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.H.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.mH.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.real.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.imag.__get__: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.t: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.Tensor.t: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.Tensor.t_: _OpSpec(OpLinearity.LINEAR, (0,)),
@@ -2379,8 +2385,8 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         if self._disabled:
             return func(*args, **kwargs)
 
-        # Property access (e.g. .grad, .data, .shape) -- not tensor math.
-        if getattr(func, "__name__", None) == "__get__":
+        # Property access (e.g. .grad, .data, .shape): pass through unless registered
+        if getattr(func, "__name__", None) == "__get__" and func not in _OP_REGISTRY:
             return func(*args, **kwargs)
 
         # Autograd bookkeeping, metadata queries -- not tensor math.
