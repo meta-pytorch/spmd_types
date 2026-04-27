@@ -11,6 +11,7 @@ Provides LocalTensorTestCase for simulating distributed operations
 in a single process using PyTorch's LocalTensorMode.
 """
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -24,12 +25,27 @@ from torch.testing._internal.common_utils import TestCase
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 
-class LocalTensorTestCase(TestCase):
-    """
-    Base test class that sets up LocalTensorMode and fake process group.
+class FakeProcessGroupTestCase(TestCase):
+    """Base test class that sets up a fake distributed process group.
+
+    Provides ``cls.pg`` (default process group) and ``cls.mesh`` (device
+    mesh).
+
+    To configure the mesh topology, either:
+    - Set ``MESH_SHAPE`` (tuple) and ``MESH_DIM_NAMES`` for multi-dim meshes.
+    - Set ``WORLD_SIZE`` (int) for a simple 1-D mesh named "tp".
+
+    ``MESH_SHAPE`` takes precedence; when set, ``WORLD_SIZE`` is derived
+    from it.  When only ``WORLD_SIZE`` is set, ``MESH_SHAPE`` defaults to
+    ``(WORLD_SIZE,)``.
+
+    Does NOT enter ``LocalTensorMode`` -- subclass ``LocalTensorTestCase``
+    if you need multi-rank ``LocalTensor`` objects.
     """
 
-    WORLD_SIZE = 3
+    MESH_SHAPE: tuple[int, ...] | None = None
+    MESH_DIM_NAMES: tuple[str, ...] = ("tp",)
+    WORLD_SIZE: int = 3
 
     @classmethod
     def setUpClass(cls):
@@ -37,12 +53,20 @@ class LocalTensorTestCase(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
         _reset()
+        if cls.MESH_SHAPE is not None:
+            mesh_shape = cls.MESH_SHAPE
+            cls.WORLD_SIZE = math.prod(mesh_shape)
+        else:
+            mesh_shape = (cls.WORLD_SIZE,)
+        world_size = cls.WORLD_SIZE
         store = FakeStore()
         dist.init_process_group(
-            backend="fake", rank=0, world_size=cls.WORLD_SIZE, store=store
+            backend="fake", rank=0, world_size=world_size, store=store
         )
         cls.pg = dist.distributed_c10d._get_default_group()
-        cls.mesh = init_device_mesh("cpu", (cls.WORLD_SIZE,), mesh_dim_names=("tp",))
+        cls.mesh = init_device_mesh(
+            "cpu", mesh_shape, mesh_dim_names=cls.MESH_DIM_NAMES
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -50,6 +74,10 @@ class LocalTensorTestCase(TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
         _reset()
+
+
+class LocalTensorTestCase(FakeProcessGroupTestCase):
+    """FakeProcessGroupTestCase with LocalTensorMode for multi-rank tensors."""
 
     def setUp(self):
         """Enter LocalTensorMode for each test."""

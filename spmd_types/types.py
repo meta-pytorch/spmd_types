@@ -328,6 +328,20 @@ class RedistributeError(SpmdTypeError):
     pass
 
 
+class DTensorPropagationError(SpmdTypeError):
+    """Error raised when DTensor shard propagation cannot proceed.
+
+    Examples:
+    - The shard dim has local size 1 and ``view_groups`` drops it, so
+      the target shape cannot be unambiguously scaled from local to global.
+    - The shard dim is split across multiple output dims (``Split``), so
+      we cannot determine which output dim absorbs the mesh-size factor.
+    - DTensor produces a ``_StridedShard`` placement (not yet supported).
+    """
+
+    pass
+
+
 def _canonicalize_shard(typ: PerMeshAxisSpmdType, ndim: int) -> PerMeshAxisSpmdType:
     """Resolve negative dims in Shard types. Returns typ unchanged if not Shard.
 

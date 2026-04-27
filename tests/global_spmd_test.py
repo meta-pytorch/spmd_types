@@ -54,10 +54,11 @@ from spmd_types._checker import (
     typecheck,
 )
 from spmd_types._mesh_axis import _reset
-from spmd_types._test_utils import LocalTensorTestCase
+from spmd_types._test_utils import FakeProcessGroupTestCase, LocalTensorTestCase
 from spmd_types._type_attr import get_axis_local_type
 from spmd_types.types import (
     DeviceMeshAxis,
+    DTensorPropagationError,
     normalize_axis,
     partition_spec_to_shard_types,
     PerMeshAxisSpmdType,
@@ -1437,6 +1438,183 @@ class TestInferGlobalOutputType(unittest.TestCase):
         self.assertEqual(specs[0], PartitionSpec(None, tp))
         global_results = [to_local_type(dtensor_placement_to_spmd_type(pls[0][tp]))]
         _validate_and_update_local_global_correspondence(V, global_results, tp)
+
+
+class TestShapePropagation(FakeProcessGroupTestCase):
+    """Test _ShardPropagator propagates shard axes through reshape/view ops."""
+
+    def setUp(self) -> None:
+        self.tp = normalize_axis(self.mesh.get_group("tp"))
+        self._tc_cm = typecheck(local=False)
+        self._tc_cm.__enter__()
+
+    def tearDown(self) -> None:
+        self._tc_cm.__exit__(None, None, None)
+
+    def _make_typed(
+        self, shape: tuple[int, ...], typ: PerMeshAxisSpmdType
+    ) -> torch.Tensor:
+        """Create a plain tensor with SPMD type and optional PartitionSpec."""
+        x = torch.randn(shape)
+        local_typ = V if isinstance(typ, Shard) else typ
+        with typecheck(strict_mode="permissive"):
+            assert_type(x, {self.tp: local_typ})
+        if isinstance(typ, Shard):
+            spec = [self.tp if d == typ.dim else None for d in range(len(shape))]
+            _set_partition_spec(x, PartitionSpec(*spec))
+        return x
+
+    def _shard_global(
+        self, global_tensor: torch.Tensor, shard_dim: int
+    ) -> list[torch.Tensor]:
+        """Slice a global tensor into per-rank shards using ceiling division."""
+        global_dim_size = global_tensor.shape[shard_dim]
+        chunk = (global_dim_size + self.WORLD_SIZE - 1) // self.WORLD_SIZE
+        shards = []
+        for r in range(self.WORLD_SIZE):
+            start = min(chunk * r, global_dim_size)
+            end = min(chunk * (r + 1), global_dim_size)
+            shards.append(global_tensor.narrow(shard_dim, start, end - start).clone())
+        return shards
+
+    @parametrize(
+        "input_shape,shard_dim,target_shape,expected",
+        [
+            # Forward: shard dim passes through unchanged.
+            ((6, 4), 0, (6, 4), S(0)),
+            ((6, 4), 1, (6, 4), S(1)),
+            # Unsqueeze: insert size-1 dim, shard dim shifts.
+            ((6, 4), 0, (6, 1, 4), S(0)),
+            ((6, 4), 1, (6, 1, 4), S(2)),
+            ((6, 4), 0, (1, 6, 4), S(1)),
+            # Squeeze: remove size-1 dim.
+            ((6, 1, 4), 0, (6, 4), S(0)),
+            ((6, 1, 4), 2, (6, 4), S(1)),
+            # Flatten: non-shard dims merge, shard dim untouched.
+            ((2, 3, 4), 0, (2, 12), S(0)),
+            ((2, 3, 4), 2, (6, 4), S(1)),
+            # Singleton shard dim (size 1) with matching size-1 output dim:
+            # view_groups maps InputDim(0) to output dim 0 (both size 1), so
+            # scaling works normally.
+            ((1, 6), 0, (1, 2, 3), S(0)),
+            # Target shape contains -1 (inferred dim).
+            ((6, 4), 0, (-1, 4), S(0)),
+            ((6, 4), 1, (6, -1), S(1)),
+            ((6, 4), 0, (6, 1, -1), S(0)),
+        ],
+        name_fn=lambda input_shape, shard_dim, target_shape, expected: (
+            f"{'x'.join(map(str, input_shape))}_S{shard_dim}"
+            f"_to_{'x'.join(map(str, target_shape))}"
+        ),
+    )
+    def test_reshape_op(
+        self,
+        input_shape: tuple[int, ...],
+        shard_dim: int,
+        target_shape: tuple[int, ...],
+        expected: PerMeshAxisSpmdType,
+    ) -> None:
+        """Reshape preserves shard dim through view_groups dim mapping."""
+        x = self._make_typed(input_shape, S(shard_dim))
+        y = x.reshape(*target_shape)
+        assert_type(y, {self.tp: expected})
+
+    @parametrize(
+        "global_shape,shard_dim,target_dims,expected",
+        [
+            # global_shape is the full (unsharded) tensor shape.  With
+            # WORLD_SIZE=3, dim 0 of size 8 yields local sizes [3, 3, 2].
+            # _scale_size_args multiplies the local shard dim by mesh_size
+            # (e.g. 3*3=9), which differs from the true global (8), but
+            # DTensor propagation still resolves the correct output shard dim.
+            #
+            # None entries in target_dims are replaced with the local shard
+            # dim size for each rank.
+            #
+            # Identity reshape (same shape).
+            ((8, 4), 0, (None, 4), S(0)),
+            ((6, 8), 1, (6, None), S(1)),
+            # Unsqueeze: insert size-1 dim, shard dim shifts.
+            ((8, 4), 0, (None, 1, 4), S(0)),
+            ((8, 4), 0, (1, None, 4), S(1)),
+            ((6, 8), 1, (6, 1, None), S(2)),
+            # Squeeze: remove size-1 dim.
+            ((8, 1, 4), 0, (None, 4), S(0)),
+            ((6, 1, 8), 2, (6, None), S(1)),
+            # Flatten: non-shard dims merge, shard dim untouched.
+            ((8, 3, 4), 0, (None, 12), S(0)),
+            ((2, 3, 8), 2, (6, None), S(1)),
+            # Target shape contains -1 (inferred dim).
+            ((8, 4), 0, (-1, 4), S(0)),
+            ((6, 8), 1, (6, -1), S(1)),
+        ],
+        name_fn=lambda global_shape, shard_dim, target_dims, expected: (
+            f"{'x'.join(map(str, global_shape))}_S{shard_dim}"
+            f"_to_{'x'.join('N' if d is None else str(d) for d in target_dims)}"
+        ),
+    )
+    def test_uneven_reshape_op(
+        self,
+        global_shape: tuple[int, ...],
+        shard_dim: int,
+        target_dims: tuple,
+        expected: PerMeshAxisSpmdType,
+    ) -> None:
+        """Reshape with uneven sharding on the shard dim.
+
+        Slices a global tensor into per-rank shards using ceiling division
+        (matching DTensor's default), then tests each rank's local tensor
+        independently.  None entries in target_dims are replaced with the
+        rank's local shard dim size.
+        """
+        global_tensor = torch.randn(*global_shape)
+        for shard in self._shard_global(global_tensor, shard_dim):
+            local_shard_size = shard.shape[shard_dim]
+            target_shape = tuple(
+                local_shard_size if d is None else d for d in target_dims
+            )
+            x = self._make_typed(shard.shape, S(shard_dim))
+            y = x.reshape(*target_shape)
+            assert_type(y, {self.tp: expected})
+
+    def test_reshape_split_error_6x8_S1_to_6x2x4(self) -> None:
+        """Shard dim split across multiple output dims (dim 1)."""
+        x = self._make_typed((6, 8), S(1))
+        with self.assertRaisesRegex(
+            DTensorPropagationError,
+            r"Reshaping a tensor sharded on dim 1 into multiple smaller dimensions",
+        ):
+            x.reshape(6, 2, 4)
+
+    def test_reshape_split_error_12x4_S0_to_3xNx4(self) -> None:
+        """Shard dim split with -1 inferred dim."""
+        x = self._make_typed((12, 4), S(0))
+        with self.assertRaisesRegex(
+            DTensorPropagationError,
+            r"Reshaping a tensor sharded on dim 0 into multiple smaller dimensions",
+        ):
+            x.reshape(3, -1, 4)
+
+    def test_reshape_singleton_drop_error_1x6_S0_to_6(self) -> None:
+        """Shard dim has local size 1, view_groups drops it."""
+        x = self._make_typed((1, 6), S(0))
+        with self.assertRaisesRegex(
+            DTensorPropagationError,
+            r"Reshaping a tensor sharded on dim 0 \(local size 1\) is ambiguous",
+        ):
+            x.reshape(6)
+
+    def test_reshape_singleton_drop_error_1x6_S0_to_2x3(self) -> None:
+        """Shard dim has local size 1, view_groups drops it (multi-dim target)."""
+        x = self._make_typed((1, 6), S(0))
+        with self.assertRaisesRegex(
+            DTensorPropagationError,
+            r"Reshaping a tensor sharded on dim 0 \(local size 1\) is ambiguous",
+        ):
+            x.reshape(2, 3)
+
+
+instantiate_parametrized_tests(TestShapePropagation)
 
 
 if __name__ == "__main__":

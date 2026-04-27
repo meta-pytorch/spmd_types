@@ -19,11 +19,12 @@ This module imports and re-exports those symbols for backwards compatibility.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import auto, Enum
-from typing import Callable, Literal, NamedTuple, Optional
+from typing import Callable, Literal, NamedTuple, Optional, Protocol
 
 import torch
 import torch.overrides
@@ -72,7 +73,10 @@ from spmd_types.runtime import (  # noqa: F401
     trace,
 )
 from spmd_types.types import (
+    _canonicalize_shard,
+    _check_orthogonality,
     DeviceMeshAxis,
+    DTensorPropagationError,
     format_axis,
     I,
     LocalSpmdType,
@@ -94,8 +98,26 @@ from spmd_types.types import (
 from torch.distributed._local_tensor import maybe_disable_local_tensor_mode
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, placement_types as dtensor_type
+from torch.distributed.tensor._ops._view_ops import (
+    infer_size,
+    InputDim,
+    Split as _Split,
+    view_groups,
+)
 from torch.distributed.tensor._utils import ExplicitRedistributionContext
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.overrides import handle_torch_function, has_torch_function
+
+
+class _DimSpecLike(Protocol):
+    """Structural type for DimSpec from ``_view_ops.py``.
+
+    DimSpec is not exported from torch.distributed, so we use a Protocol
+    to structurally match it (InputDim, Flatten, Split, etc.).
+    """
+
+    def inputs(self) -> Iterable[_DimSpecLike]: ...
+
 
 # =============================================================================
 # Fix Suggestion Engine
@@ -1751,6 +1773,11 @@ def dtensor_placement_to_spmd_type(
     raise ValueError(f"Cannot convert DTensor placement {placement}")
 
 
+_SIZE_ARG_OPS: frozenset[Callable] = frozenset(
+    {torch.reshape, torch.Tensor.reshape, torch.Tensor.view, torch.Tensor.expand}
+)
+
+
 class _ShardPropagator:
     """Per-axis shard propagator using DTensor meta dispatch.
 
@@ -1802,6 +1829,159 @@ class _ShardPropagator:
         local_meta = torch.empty(arg.shape, dtype=arg.dtype, device="meta")
         return DTensor.from_local(local_meta, mesh, [placement])
 
+    @staticmethod
+    def _references_input_dim(spec: _DimSpecLike, target_dim: int) -> bool:
+        """Check if a DimSpec tree references a specific input dimension."""
+        if isinstance(spec, InputDim):
+            return spec.input_dim == target_dim
+        return any(
+            _ShardPropagator._references_input_dim(child, target_dim)
+            for child in spec.inputs()
+        )
+
+    def _scale_size_args(
+        self,
+        func: Callable,
+        args: tuple,
+        meta_args: tuple,
+        axis: MeshAxis,
+    ) -> tuple:
+        """Scale size-related args from local to global for DTensor propagation.
+
+        DTensor.from_local scales the local tensor to global shape, but
+        non-tensor arguments that encode sizes (e.g. the target shape in
+        tensor.view(*sizes)) remain in local terms. This uses view_groups
+        to find which output dimension corresponds to the sharded input
+        dimension and scales it by the mesh axis size so that the global
+        op is numerically valid.
+
+        Currently handles reshape/view and expand ops. Can be extended to
+        other ops that take size arguments (e.g. repeat, narrow).
+
+        The dim mapping produced by view_groups is scale-invariant: scaling
+        corresponding input and output dims by the same factor preserves the
+        grouping structure. So each axis can be handled independently using
+        just its own mesh size -- no accumulation across axes is needed.
+        """
+        if func not in _SIZE_ARG_OPS:
+            return meta_args
+
+        input_tensor = args[0]
+        assert isinstance(input_tensor, torch.Tensor)
+
+        shard = partition_spec_get_shard(get_partition_spec(input_tensor), axis)
+        if shard is None:
+            return meta_args
+
+        shard_dim = shard.dim
+        mesh_size = axis.size()
+        local_input_shape = tuple(input_tensor.shape)
+
+        if func is torch.Tensor.expand:
+            return self._scale_expand_args(args, meta_args, shard_dim, mesh_size)
+
+        # Extract the local target shape, handling both tuple-arg and varargs forms.
+        if func is torch.reshape:
+            # torch.reshape(input, shape) -- shape is always a sequence.
+            assert isinstance(args[1], (tuple, list, torch.Size))
+            local_target_shape = tuple(args[1])
+            is_single_arg = True
+        elif len(args) == 2 and isinstance(args[1], (tuple, list, torch.Size)):
+            # tensor.view((2, 3)) or tensor.reshape((2, 3))
+            local_target_shape = tuple(args[1])
+            is_single_arg = True
+        else:
+            # tensor.view(2, 3) or tensor.reshape(2, 3)
+            assert len(args) >= 2 and all(isinstance(a, int) for a in args[1:])
+            local_target_shape = tuple(args[1:])
+            is_single_arg = False
+
+        # Resolve -1 in target shape to the actual local size.
+        resolved_local_target = infer_size(
+            math.prod(local_input_shape), local_target_shape
+        )
+
+        # Use local shapes for view_groups -- the dim mapping is scale-invariant
+        # so local and global give the same grouping.
+        dim_map = view_groups(local_input_shape, tuple(resolved_local_target))
+
+        scaled_target = list(resolved_local_target)
+        match = next(
+            (
+                (out_dim, spec)
+                for out_dim, spec in enumerate(dim_map)
+                if self._references_input_dim(spec, shard_dim)
+            ),
+            None,
+        )
+
+        if match is None:
+            assert local_input_shape[shard_dim] == 1
+            raise DTensorPropagationError(
+                f"Reshaping a tensor sharded on dim {shard_dim} "
+                f"(local size 1) is ambiguous: the sharded dimension "
+                f"disappears in the reshape so we cannot determine which "
+                f"output dimension carries the sharding. "
+                f"Consider redistributing to unshard dim {shard_dim} "
+                f"before reshaping. "
+                f"input shape (local): {local_input_shape}, "
+                f"target shape (local): {local_target_shape}"
+            )
+
+        out_dim, spec = match
+        if isinstance(spec, _Split):
+            raise DTensorPropagationError(
+                f"Reshaping a tensor sharded on dim {shard_dim} into "
+                f"multiple smaller dimensions is not supported: the "
+                f"sharded dimension is split across multiple output "
+                f"dimensions. Consider redistributing to unshard dim "
+                f"{shard_dim} before reshaping. "
+                f"input shape (local): {local_input_shape}, "
+                f"target shape (local): {local_target_shape}"
+            )
+        scaled_target[out_dim] *= mesh_size
+
+        scaled_meta_args = list(meta_args)
+        if is_single_arg:
+            scaled_meta_args[1] = tuple(scaled_target)
+        else:
+            scaled_meta_args[1:] = scaled_target
+        return tuple(scaled_meta_args)
+
+    @staticmethod
+    def _scale_expand_args(
+        args: tuple,
+        meta_args: tuple,
+        shard_dim: int,
+        mesh_size: int,
+    ) -> tuple:
+        """Scale ``expand(...)`` target sizes on the sharded dim from local
+        to global.
+
+        Expand maps input dims to output dims 1:1 (no reshape), so the
+        sharded dim's target just needs ``* mesh_size`` to match the global
+        DTensor shape.  ``-1`` entries mean "preserve" and are left alone.
+        """
+        # Extract target shape, handling both tuple-arg and varargs forms.
+        if len(args) == 2 and isinstance(args[1], (tuple, list, torch.Size)):
+            local_target = tuple(args[1])
+            is_single_arg = True
+        else:
+            assert len(args) >= 2 and all(isinstance(a, int) for a in args[1:])
+            local_target = tuple(args[1:])
+            is_single_arg = False
+
+        scaled_target = list(local_target)
+        if scaled_target[shard_dim] != -1:
+            scaled_target[shard_dim] *= mesh_size
+
+        scaled_meta_args = list(meta_args)
+        if is_single_arg:
+            scaled_meta_args[1] = tuple(scaled_target)
+        else:
+            scaled_meta_args[1:] = scaled_target
+        return tuple(scaled_meta_args)
+
     def propagate(
         self,
         func: Callable,
@@ -1832,6 +2012,7 @@ class _ShardPropagator:
                 lambda x: self._to_meta_dtensor(x, axis, mesh),
                 kwargs or {},
             )
+            meta_args = self._scale_size_args(func, args, meta_args, axis)
             try:
                 with ExplicitRedistributionContext(strict=True):
                     meta_result = func(*meta_args, **meta_kwargs)
@@ -1847,7 +2028,18 @@ class _ShardPropagator:
             for item in flat:
                 if isinstance(item, DTensor):
                     assert len(item.placements) == 1, item.placements
-                    out.append(item.placements[0])
+                    p = item.placements[0]
+                    # TODO: support _StridedShard (e.g., used by FSDP2 + TP 2D
+                    # parallelism) once we need strided shard propagation in the
+                    # SPMD type checker.
+                    if isinstance(p, _StridedShard):
+                        raise DTensorPropagationError(
+                            f"DTensor produced _StridedShard placement "
+                            f"for {func.__name__} on axis "
+                            f"{format_axis(axis)}, which is not yet "
+                            f"supported by the SPMD type checker."
+                        )
+                    out.append(p)
                 else:
                     out.append(None)
             return out
