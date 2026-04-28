@@ -12,6 +12,7 @@ import unittest
 
 import torch.distributed as dist
 from spmd_types._mesh_axis import (
+    _make_axis_layout,
     _register_name,
     _reset,
     flatten_axes,
@@ -19,7 +20,6 @@ from spmd_types._mesh_axis import (
     set_printoptions,
 )
 from spmd_types._testing import fake_pg
-from torch.distributed._mesh_layout import _MeshLayout
 
 
 class TestMeshAxis(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestMeshAxis(unittest.TestCase):
 
     def test_equality_coalesced(self) -> None:
         # (2,2):(2,1) coalesces to (4,):(1,) -- should be equal.
-        a = MeshAxis(_MeshLayout((2, 2), (2, 1)))
+        a = MeshAxis(_make_axis_layout((2, 2), (2, 1)))
         b = MeshAxis.of(4, 1)
         self.assertEqual(a, b)
         self.assertEqual(hash(a), hash(b))
@@ -56,19 +56,19 @@ class TestMeshAxis(unittest.TestCase):
 
     def test_of_unit_stride(self) -> None:
         a = MeshAxis.of(4, 1)
-        b = MeshAxis(_MeshLayout((4,), (1,)))
+        b = MeshAxis(_make_axis_layout((4,), (1,)))
         self.assertEqual(a, b)
 
     def test_of_custom_stride(self) -> None:
         a = MeshAxis.of(4, 2)
-        b = MeshAxis(_MeshLayout((4,), (2,)))
+        b = MeshAxis(_make_axis_layout((4,), (2,)))
         self.assertEqual(a, b)
 
     def test_size(self) -> None:
         a = MeshAxis.of(4, 1)
         self.assertEqual(a.size(), 4)
 
-        b = MeshAxis(_MeshLayout((2, 3), (3, 1)))
+        b = MeshAxis(_make_axis_layout((2, 3), (3, 1)))
         self.assertEqual(b.size(), 6)
 
     def test_size_single_rank(self) -> None:
@@ -112,12 +112,12 @@ class TestMeshAxis(unittest.TestCase):
             self.assertEqual(repr(MeshAxis.of(4, 1)), "MeshAxis(4:1)")
             self.assertEqual(repr(MeshAxis.of(4, 2)), "MeshAxis(4:2)")
             self.assertEqual(
-                repr(MeshAxis(_MeshLayout((2, 3), (3, 1)))),
+                repr(MeshAxis(_make_axis_layout((2, 3), (3, 1)))),
                 "MeshAxis(6:1)",  # coalesced
             )
             # Multi-dimensional layout that doesn't coalesce to 1D.
             self.assertEqual(
-                repr(MeshAxis(_MeshLayout((3, 2), (4, 1)))),
+                repr(MeshAxis(_make_axis_layout((3, 2), (4, 1)))),
                 "MeshAxis((3, 2):(4, 1))",
             )
 

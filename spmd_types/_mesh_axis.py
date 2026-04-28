@@ -29,6 +29,25 @@ from spmd_types import _dist
 from torch.distributed._local_tensor._c10d import _indices_to_layout
 from torch.distributed._mesh_layout import _MeshLayout
 
+try:
+    from torch.distributed._mesh_layout import _FlatLayout
+
+    _AxisLayout = _FlatLayout
+
+    def _make_axis_layout(
+        shape: tuple[int, ...], strides: tuple[int, ...]
+    ) -> _FlatLayout:
+        return _FlatLayout(shape, strides)
+
+except ImportError:
+    _AxisLayout = _MeshLayout
+
+    def _make_axis_layout(
+        shape: tuple[int, ...], strides: tuple[int, ...]
+    ) -> _MeshLayout:
+        return _MeshLayout(shape, strides)
+
+
 if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
@@ -68,12 +87,15 @@ class MeshAxis:
             the rank pattern for this axis.
     """
 
-    layout: _MeshLayout
+    layout: _AxisLayout
 
     def __post_init__(self) -> None:
         # Always store the coalesced form so that equivalent layouts compare
         # equal (e.g., (2,2):(2,1) == (4):(1)).
-        object.__setattr__(self, "layout", self.layout.coalesce())
+        # _FlatLayout auto-coalesces on construction; old _MeshLayout needs explicit call.
+        coalesce = getattr(self.layout, "coalesce", None)
+        if coalesce is not None:
+            object.__setattr__(self, "layout", coalesce())
 
     # -- Set inclusion (subgroup checks) -----------------------------------
 
@@ -131,7 +153,7 @@ class MeshAxis:
                 shapes.append(s)
                 strides.append(d)
             expected *= ax.size()
-        combined = _MeshLayout(tuple(shapes), tuple(strides))
+        combined = _make_axis_layout(tuple(shapes), tuple(strides))
         return len(set(combined.all_ranks_from_zero())) == expected
 
     # -- Size --------------------------------------------------------------
@@ -151,6 +173,11 @@ class MeshAxis:
         """Format the layout as a compact string (e.g. '4:1')."""
         shape = self.layout.shape
         stride = self.layout.stride
+        if isinstance(shape, tuple):
+            if len(shape) == 0:
+                return "1:1"
+            if len(shape) == 1:
+                return f"{shape[0]}:{stride[0]}"
         return f"{shape}:{stride}"
 
     def __repr__(self) -> str:
@@ -210,7 +237,7 @@ class MeshAxis:
                 raise TypeError(
                     "MeshAxis.of(size, stride) requires both size and stride"
                 )
-            return MeshAxis(_MeshLayout((size_or_pg,), (stride,)))
+            return MeshAxis(_make_axis_layout((size_or_pg,), (stride,)))
         if stride is not None:
             raise TypeError(
                 "stride cannot be specified when constructing from a ProcessGroup"
@@ -229,7 +256,9 @@ def flatten_axes(axes: tuple[MeshAxis, ...]) -> MeshAxis:
         (sd for axis in axes for sd in axis.layout.sizes_and_strides),
         key=lambda item: -item[1],
     )
-    return MeshAxis(_MeshLayout(tuple(s for s, _ in atoms), tuple(d for _, d in atoms)))
+    return MeshAxis(
+        _make_axis_layout(tuple(s for s, _ in atoms), tuple(d for _, d in atoms))
+    )
 
 
 def _best_name(names: set[str]) -> str:
@@ -304,13 +333,13 @@ def _from_pg(pg: ProcessGroup) -> MeshAxis:
 
     if len(ranks) == 1:
         # Single-rank group: trivial layout.
-        layout = _MeshLayout(1, 1)
+        layout = _make_axis_layout((1,), (1,))
     else:
         sorted_ranks = sorted(ranks)
         offset = sorted_ranks[0]
         zero_based = [r - offset for r in sorted_ranks]
         shape, strides = _indices_to_layout(zero_based)
-        layout = _MeshLayout(shape, strides)
+        layout = _make_axis_layout(shape, strides)
 
     axis = MeshAxis(layout)
 
