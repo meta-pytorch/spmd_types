@@ -2769,19 +2769,18 @@ Source group {mesh_tp} and destination group {mesh_ep} flatten to different rank
   )""",
             )
 
-    def test_reinterpret_mesh_rejects_partition_spec(self) -> None:
-        """reinterpret_mesh is local-SPMD-only and rejects global sharding metadata."""
+    def test_reinterpret_mesh_remaps_partition_spec(self) -> None:
+        """reinterpret_mesh remaps PartitionSpec across mesh-axis flattening."""
         from spmd_types._checker import reinterpret_mesh
+        from spmd_types.runtime import get_partition_spec
 
         with typecheck(strict_mode="strict"):
             x = torch.randn(4, 4)
-            assert_type(x, {self.dp: V}, PartitionSpec(self.dp, None))
-            with self.assertRaises(SpmdTypeError) as cm:
-                reinterpret_mesh(x, {self.dp_cp: V})
-            self.assertExpectedInline(
-                str(cm.exception),
-                """reinterpret_mesh does not support tensors carrying PartitionSpec. Cross-mesh reinterpretation is currently local-SPMD-only.""",
+            assert_type(
+                x, {self.dp: V, self.cp: V}, PartitionSpec((self.dp, self.cp), None)
             )
+            y = reinterpret_mesh(x, {self.dp_cp: V})
+            self.assertEqual(get_partition_spec(y), PartitionSpec(self.dp_cp, None))
 
     def test_reinterpret_mesh_axes_only_flatten_unflatten(self) -> None:
         """axes-only reinterpret_mesh: dp,cp -> dp_cp derives types from source."""
@@ -2960,6 +2959,16 @@ backward() called on a loss tensor with no SPMD type annotation. In strict mode,
             loss = (x * x).sum()
         with typecheck(strict_mode="permissive"):
             loss.backward()
+
+
+class TestScalarWithPartitionSpec(SpmdTypeCheckedTestCase):
+    """Verify ops with Scalar args work when tensor has PartitionSpec."""
+
+    def test_narrow_with_scalar_and_partition_spec(self):
+        x = torch.randn(4, 8)
+        assert_type(x, {self.pg: S(1)})
+        result = torch.narrow(x, 1, Scalar(0, {self.pg: V}), Scalar(4, {self.pg: V}))
+        self.assertIs(get_axis_local_type(result, self.pg), V)
 
 
 if __name__ == "__main__":

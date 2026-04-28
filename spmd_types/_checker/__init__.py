@@ -512,8 +512,11 @@ def _cross_mesh_advice(input_types_list: list[LocalSpmdType]) -> str:  # noqa: C
             # so that type mismatches don't mask axis compatibility.
             a_uniform: LocalSpmdType = {ax: R for ax in a}
             b_uniform: LocalSpmdType = {ax: R for ax in b}
-            compat = check_reinterpret_mesh_compatible(a_uniform, b_uniform)
-            if not isinstance(compat, str):
+            try:
+                check_reinterpret_mesh_compatible(a_uniform, b_uniform)
+            except SpmdTypeError:
+                pass
+            else:
                 # They are structurally compatible. Suggest converting to
                 # the set with more axes (the finer-grained mesh).
                 if len(a) >= len(b):
@@ -696,6 +699,56 @@ def _add_sub_axis_advice(
         )
 
 
+def _auto_reinterpret_cross_mesh(
+    input_types_list: list[LocalSpmdType],
+    partition_specs: list[PartitionSpec | None],
+) -> tuple[list[LocalSpmdType], list[PartitionSpec | None]]:
+    """Auto-reinterpret operands from foreign meshes to the current mesh.
+
+    Returns fresh lists with the (possibly remapped) types and partition specs.
+    When no current mesh is set, or all operands already live on the current
+    mesh, the returned lists carry the same entries as the inputs.
+
+    This is stage 1 of the 3-stage typing pipeline (cross-mesh reinterpret ->
+    local SPMD -> global SPMD).  ``infer_output_type`` and global shard
+    propagation operate on types that already live on the current mesh.
+
+    Args:
+        input_types_list: List of LocalSpmdType dicts, one per operand.
+        partition_specs: List of PartitionSpecs (same length as
+            ``input_types_list``).
+
+    Returns:
+        Tuple of (new input types, new partition specs).
+
+    Raises:
+        SpmdTypeError: when an operand cannot be remapped to the current
+            mesh.
+    """
+    new_types = list(input_types_list)
+    new_specs = list(partition_specs)
+
+    mesh = current_mesh()
+    if mesh is None:
+        return new_types, new_specs
+
+    from spmd_types._mesh_region import check_reinterpret_mesh_compatible
+
+    for i, typ in enumerate(new_types):
+        try:
+            new_types[i], new_specs[i] = check_reinterpret_mesh_compatible(
+                typ, mesh, new_specs[i]
+            )
+        except SpmdTypeError as e:
+            raise SpmdTypeError(
+                f"args[{i}] cannot be auto-reinterpreted from "
+                f"{_format_axis_set(typ.keys())} to the current mesh "
+                f"{_format_axis_set(mesh)}. {e}"
+            ) from e
+
+    return new_types, new_specs
+
+
 def infer_output_type(  # noqa: C901
     input_types_list: list[LocalSpmdType],
     out_partial_axes: set[DeviceMeshAxis] | None = None,
@@ -703,6 +756,11 @@ def infer_output_type(  # noqa: C901
 ) -> LocalSpmdType:
     """
     Infer output SPMD types from a list of input types.
+
+    Stage 2 of the 3-stage typing pipeline.  Inputs are expected to be on
+    the current mesh -- run ``_auto_reinterpret_cross_mesh`` first to lift
+    foreign-mesh types onto the current mesh.  Global SPMD shard
+    propagation runs separately as stage 3.
 
     This implements the typing rules for operations like einsum:
     - If all operands are R -> output is R
@@ -728,23 +786,7 @@ def infer_output_type(  # noqa: C901
     if out_partial_axes is None:
         out_partial_axes = set()
 
-    # Auto-reinterpret operands from foreign meshes to the current mesh
-    # before collecting axes, so we don't need to recompute afterwards.
     mesh = current_mesh()
-    if mesh is not None:
-        from spmd_types._mesh_region import check_reinterpret_mesh_compatible
-
-        for i, typ in enumerate(input_types_list):
-            non_mesh = frozenset(typ.keys()) - mesh if typ else frozenset()
-            if non_mesh:
-                target = check_reinterpret_mesh_compatible(typ, mesh)
-                if isinstance(target, str):
-                    raise SpmdTypeError(
-                        f"args[{i}] cannot be auto-reinterpreted from "
-                        f"{_format_axis_set(typ.keys())} to the current mesh "
-                        f"{_format_axis_set(mesh)}. {target}"
-                    )
-                input_types_list[i] = target
 
     # Collect all mesh axes mentioned (after reinterpretation).
     all_axes: set[DeviceMeshAxis] = set()
@@ -1812,16 +1854,34 @@ class _ShardPropagator:
 
         Non-tensor args pass through unchanged. Untyped tensors become plain
         meta tensors (not DTensors, so DTensor dispatch ignores them).
+
+        For tensors annotated on a foreign mesh, applies the cross-mesh
+        auto-reinterpret on the fly.  Stage 1 of the dispatch pipeline has
+        already validated compatibility, so this call is guaranteed to
+        succeed.
         """
         if not isinstance(arg, torch.Tensor):
             return arg
         if not has_local_type(arg):
             return torch.empty(arg.shape, dtype=arg.dtype, device="meta")
 
+        local_type = get_local_type(arg)
+        spec = get_partition_spec(arg)
+
+        current_mesh_axes = current_mesh()
+        if current_mesh_axes is not None and local_type:
+            from spmd_types._mesh_region import check_reinterpret_mesh_compatible
+
+            # Stage 1 of the dispatch already validated compatibility, so
+            # this call is guaranteed to succeed.
+            local_type, spec = check_reinterpret_mesh_compatible(
+                local_type, current_mesh_axes, spec
+            )
+
         # If the tensor has a PartitionSpec on this axis, use that. Otherwise
         # fall back to the local SPMD type (R, I, or P).
-        shard = partition_spec_get_shard(get_partition_spec(arg), axis)
-        typ = shard if shard is not None else get_local_type(arg)[axis]
+        shard = partition_spec_get_shard(spec, axis)
+        typ = shard if shard is not None else local_type[axis]
         # I (Invariant) is lost here -- it maps to Replicate since DTensor
         # has no Invariant concept. It will be recovered based on local
         # SPMD propagation in _validate_and_update_local_global_correspondence.
@@ -2822,25 +2882,22 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                 input_types_list = _collect_scalar_types(
                     input_types_list, original_args, original_kwargs, spec
                 )
+                # _collect_scalar_types may append entries for typed scalars;
+                # pad partition_specs with None to keep both lists aligned.
+                partition_specs = list(info.partition_specs)
+                while len(partition_specs) < len(input_types_list):
+                    partition_specs.append(None)
 
-                # Collect global shard axes in topologically sorted order from
-                # input PartitionSpecs. This order is preserved through
-                # propagation and into the output PartitionSpec.
-                if self._local:
-                    global_shard_axes, shard_edges = [], {}
-                else:
-                    all_axes: set[DeviceMeshAxis] = set()
-                    for typ in input_types_list:
-                        all_axes.update(typ.keys())
-                    global_shard_axes, shard_edges = _collect_shard_axes(
-                        info.partition_specs, all_axes
-                    )
+                # Stage 1: cross-mesh reinterpret.
+                input_types_list, partition_specs = _auto_reinterpret_cross_mesh(
+                    input_types_list, partition_specs
+                )
 
-                # Local first: infer R/I/V/P output types for all axes.
-                # Strict/permissive mode is enforced here (missing axis
-                # annotations raise in strict, get skipped in permissive).
-                # Global shard propagation runs after and operates only on axes
-                # present in output_type (filtered below).
+                # Stage 2: local R/I/V/P propagation. Local first: infer R/I/V/P
+                # output types for all axes. Strict/permissive mode is enforced
+                # here (missing axis annotations raise in strict, get skipped in
+                # permissive). Global shard propagation runs after and operates
+                # only on axes present in output_type (filtered below).
                 if not input_types_list:
                     # No typed tensor inputs and no scalars -- factory op.
                     output_type = _deterministic_factory_type(func)
@@ -2857,7 +2914,19 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     # NB: output_type may be further updated because global
                     # shard propagation below may promote local type V to P.
                     output_type = infer_output_type(
-                        input_types_list, linearity=linearity
+                        input_types_list,
+                        linearity=linearity,
+                    )
+
+                # Stage 3: global shard propagation.
+                if self._local:
+                    global_shard_axes, shard_edges = [], {}
+                else:
+                    all_axes: set[DeviceMeshAxis] = set()
+                    for typ in input_types_list:
+                        all_axes.update(typ.keys())
+                    global_shard_axes, shard_edges = _collect_shard_axes(
+                        partition_specs, all_axes
                     )
 
                 # Validate mutation safety for in-place/out operations.

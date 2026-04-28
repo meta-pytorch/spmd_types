@@ -25,6 +25,7 @@ from spmd_types._state import current_mesh
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import get_local_type, set_local_type as _set_local_type_raw
 from spmd_types.runtime import (
+    _set_partition_spec,
     _TRACE,
     _trace_op,
     _validate,
@@ -224,11 +225,6 @@ def reinterpret_mesh(
         raise SpmdTypeError(
             "reinterpret_mesh requires a tensor with an existing local SPMD type."
         )
-    if get_partition_spec(tensor) is not None:
-        raise SpmdTypeError(
-            "reinterpret_mesh does not support tensors carrying PartitionSpec. "
-            "Cross-mesh reinterpretation is currently local-SPMD-only."
-        )
 
     from spmd_types._mesh import _resolve_axes
     from spmd_types._mesh_region import check_reinterpret_mesh_compatible
@@ -239,17 +235,21 @@ def reinterpret_mesh(
         dst = _resolve_axes(type)
 
     src_type = get_local_type(tensor)
-    compat = check_reinterpret_mesh_compatible(src_type, dst)
-    if isinstance(compat, str):
+    src_spec = get_partition_spec(tensor)
+    try:
+        new_type, new_spec = check_reinterpret_mesh_compatible(src_type, dst, src_spec)
+    except SpmdTypeError as e:
         context = _format_operator_context(
             reinterpret_mesh,
             [_RawArgEntry(None, tensor), _RawArgEntry(None, dst)],
             mesh=current_mesh(),
         )
-        raise SpmdTypeError(compat, context=context)
+        raise SpmdTypeError(str(e), context=context) from e
 
     result = tensor if inplace else torch.ops.aten.alias.default(tensor)
-    _set_local_type_raw(result, compat)
+    _set_local_type_raw(result, new_type)
+    if new_spec is not None:
+        _set_partition_spec(result, new_spec)
     if _TRACE:
-        _trace_op(reinterpret_mesh, [src_type], compat)
+        _trace_op(reinterpret_mesh, [src_type], new_type)
     return result

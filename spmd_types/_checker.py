@@ -757,14 +757,15 @@ def reinterpret_mesh(
 
     src_type = get_local_type(tensor)
     dst_type = _validate(type)
-    compat = check_reinterpret_mesh_compatible(src_type, dst_type)
-    if isinstance(compat, str):
+    try:
+        check_reinterpret_mesh_compatible(src_type, dst_type)
+    except SpmdTypeError as e:
         context = _format_operator_context(
             reinterpret_mesh,
             [_RawArgEntry(None, tensor), _RawArgEntry(None, dst_type)],
             mesh=current_mesh(),
         )
-        raise SpmdTypeError(compat, context=context)
+        raise SpmdTypeError(str(e), context=context) from e
 
     result = torch.ops.aten.alias.default(tensor)
     _set_local_type_raw(result, dst_type)
@@ -1085,8 +1086,11 @@ def _cross_mesh_advice(input_types_list: list[LocalSpmdType]) -> str:  # noqa: C
             # so that type mismatches don't mask axis compatibility.
             a_uniform: LocalSpmdType = {ax: R for ax in a}
             b_uniform: LocalSpmdType = {ax: R for ax in b}
-            compat = check_reinterpret_mesh_compatible(a_uniform, b_uniform)
-            if not isinstance(compat, str):
+            try:
+                check_reinterpret_mesh_compatible(a_uniform, b_uniform)
+            except SpmdTypeError:
+                pass
+            else:
                 # They are structurally compatible. Suggest converting to
                 # the set with more axes (the finer-grained mesh).
                 if len(a) >= len(b):
@@ -1310,14 +1314,16 @@ def infer_output_type(  # noqa: C901
         for i, typ in enumerate(input_types_list):
             non_mesh = frozenset(typ.keys()) - mesh if typ else frozenset()
             if non_mesh:
-                target = check_reinterpret_mesh_compatible(typ, mesh)
-                if isinstance(target, str):
+                try:
+                    input_types_list[i], _ = check_reinterpret_mesh_compatible(
+                        typ, mesh
+                    )
+                except SpmdTypeError as e:
                     raise SpmdTypeError(
                         f"args[{i}] cannot be auto-reinterpreted from "
                         f"{_format_axis_set(typ.keys())} to the current mesh "
-                        f"{_format_axis_set(mesh)}. {target}"
-                    )
-                input_types_list[i] = target
+                        f"{_format_axis_set(mesh)}. {e}"
+                    ) from e
 
     # Collect all mesh axes mentioned (after reinterpretation).
     all_axes: set[DeviceMeshAxis] = set()

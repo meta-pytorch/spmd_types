@@ -1617,5 +1617,118 @@ class TestShapePropagation(FakeProcessGroupTestCase):
 instantiate_parametrized_tests(TestShapePropagation)
 
 
+# =============================================================================
+# Cross-mesh PartitionSpec remapping
+# =============================================================================
+
+
+class TestCrossMeshSpecRemapping(unittest.TestCase):
+    """Test that auto-reinterpret remaps PartitionSpec when switching meshes."""
+
+    WORLD_SIZE = 16
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        _reset()
+        store = FakeStore()
+        dist.init_process_group(
+            backend="fake", rank=0, world_size=cls.WORLD_SIZE, store=store
+        )
+        mesh = init_device_mesh("cpu", (2, 2, 4), mesh_dim_names=("dp", "cp", "tp"))
+        cls.dp = normalize_axis(mesh.get_group("dp"))
+        cls.cp = normalize_axis(mesh.get_group("cp"))
+        cls.tp = normalize_axis(mesh.get_group("tp"))
+        dp_cp_mesh = mesh["dp", "cp"]._flatten("dp_cp")
+        cls.dp_cp = normalize_axis(dp_cp_mesh.get_group("dp_cp"))
+        cls.fine_mesh = frozenset({cls.dp, cls.cp, cls.tp})
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        _reset()
+
+    def test_shared_axis_spec_preserved(self):
+        """S(0)@tp on {dp_cp, tp} mesh auto-reinterprets to {dp, cp, tp}, spec preserved."""
+        from spmd_types import set_current_mesh
+
+        with typecheck(local=False, strict_mode="strict"):
+            x = torch.randn(4, 3)
+            assert_type(x, {self.dp_cp: R, self.tp: S(0)})
+            with set_current_mesh(self.fine_mesh):
+                result = torch.add(x, x)
+                self.assertIs(get_axis_local_type(result, self.dp), R)
+                self.assertIs(get_axis_local_type(result, self.cp), R)
+                self.assertIs(get_axis_local_type(result, self.tp), V)
+                self.assertEqual(
+                    get_partition_spec(result), PartitionSpec(self.tp, None)
+                )
+
+    def test_reversed_multi_axis_spec_passed(self):
+        """PartitionSpec((dp, cp), None) remaps to PartitionSpec(dp_cp, None)."""
+        from spmd_types import set_current_mesh
+
+        with typecheck(local=False, strict_mode="strict"):
+            x = torch.randn(4, 3)
+            assert_type(
+                x,
+                {self.dp: V, self.cp: V, self.tp: R},
+                PartitionSpec((self.dp, self.cp), None),
+            )
+            with set_current_mesh(frozenset({self.dp_cp, self.tp})):
+                result = torch.add(x, x)
+                self.assertEqual(
+                    get_partition_spec(result), PartitionSpec(self.dp_cp, None)
+                )
+
+    def test_reversed_multi_axis_spec_rejected(self):
+        """PartitionSpec((cp, dp), None) rejected: wrong axis order for dp_cp."""
+        from spmd_types import set_current_mesh
+
+        with typecheck(local=False, strict_mode="strict"):
+            x = torch.randn(4, 3)
+            assert_type(
+                x,
+                {self.dp: V, self.cp: V, self.tp: R},
+                PartitionSpec((self.cp, self.dp), None),
+            )
+            with set_current_mesh(frozenset({self.dp_cp, self.tp})):
+                with self.assertRaises(SpmdTypeError):
+                    torch.add(x, x)
+
+    def test_multi_segment_spec_remapped(self):
+        """PartitionSpec((tp, dp, cp),) segments into tp + (dp,cp)->dp_cp."""
+        from spmd_types import set_current_mesh
+
+        with typecheck(local=False, strict_mode="strict"):
+            x = torch.randn(4, 3)
+            assert_type(
+                x,
+                {self.dp: V, self.cp: V, self.tp: V},
+                PartitionSpec((self.tp, self.dp, self.cp), None),
+            )
+            with set_current_mesh(frozenset({self.dp_cp, self.tp})):
+                result = torch.add(x, x)
+                self.assertEqual(
+                    get_partition_spec(result),
+                    PartitionSpec((self.tp, self.dp_cp), None),
+                )
+
+    def test_separate_axes_spec_remapped_rejected(self):
+        """PartitionSpec(dp, cp) remaps individual axes to dp_cp."""
+        from spmd_types import set_current_mesh
+
+        with typecheck(local=False, strict_mode="strict"):
+            x = torch.randn(4, 3)
+            assert_type(
+                x, {self.dp: V, self.cp: V, self.tp: R}, PartitionSpec(self.dp, self.cp)
+            )
+            with set_current_mesh(frozenset({self.dp_cp, self.tp})):
+                with self.assertRaises(SpmdTypeError):
+                    result = torch.add(x, x)
+
+
 if __name__ == "__main__":
     run_tests()
