@@ -55,6 +55,7 @@ from spmd_types.runtime import (  # noqa: F401
     assert_type_like,
     mutate_type,
     register_autograd_function,
+    register_decomposition,
     register_local_autograd_function,
     trace,
 )

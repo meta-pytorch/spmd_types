@@ -11,7 +11,8 @@ This module provides the core functions that model code (non-test,
 non-checker) needs to annotate tensors with SPMD types:
 
 - ``assert_type`` / ``assert_local_type`` / ``mutate_type`` -- annotation APIs
-- ``register_autograd_function`` / ``register_local_autograd_function`` -- decorators
+- ``register_autograd_function`` / ``register_local_autograd_function`` /
+  ``register_decomposition`` -- autograd.Function registration decorators
 - ``has_local_type`` / ``get_partition_spec`` -- queries
 - ``trace`` -- logging
 
@@ -703,3 +704,126 @@ def register_autograd_function(cls: type) -> type:
         )
     _TYPECHECK_AUTOGRAD_FUNCTIONS.add(cls)
     return cls
+
+
+def register_decomposition(
+    cls: type,
+    ref_impl: "Callable[..., object] | None" = None,  # noqa: F821
+) -> "type | Callable[..., object]":  # noqa: F821
+    """Register an autograd.Function whose SPMD types are derived from a
+    pure-PyTorch reference implementation.
+
+    Fused custom kernels (e.g. Triton) that are wrapped as a single
+    ``torch.autograd.Function`` are opaque to the SPMD type checker.  Rather
+    than hand-writing a ``typecheck_forward`` that re-validates every input
+    and stamps every output, register the equivalent pure-PyTorch
+    decomposition.  The checker traces the decomposition -- each primitive
+    aten op contributes its own SPMD rule -- and the inferred types are
+    copied onto the real fused output at runtime.
+
+    The fused kernel still runs for the actual forward.  The decomposition
+    runs only for its types; it is executed under the active ``typecheck()``
+    mode but its computed tensor values are discarded.
+
+    Args:
+        cls: autograd.Function subclass (the fused kernel wrapper).
+        ref_impl: callable with the same signature and output tree shape as
+            ``cls.apply``.  Must use only ops that already have SPMD rules
+            (aten primitives or other registered autograd functions).
+            If omitted, returns a decorator that takes ``ref_impl``.
+
+    Returns:
+        ``ref_impl`` when both arguments are provided (so a direct call
+        does not clobber the function name when used as a one-arg
+        decorator); otherwise a decorator that registers ``ref_impl``
+        against ``cls``.
+
+    Example (function-call form)::
+
+        from ops.interfaces.pos_emb.rope import _RoPE, native_rope
+
+        register_decomposition(_RoPE, native_rope)
+
+    Example (decorator form)::
+
+        @register_decomposition(_RoPE)
+        def native_rope(xq, xk, freqs_cis, ...):
+            ...
+    """
+    if ref_impl is None:
+        # Decorator-factory form: @register_decomposition(cls)
+        def decorator(ref_impl):
+            return register_decomposition(cls, ref_impl)
+
+        return decorator
+
+    from torch.utils._pytree import tree_flatten, tree_map
+
+    def _to_meta(arg):
+        """Convert a tensor to a meta tensor preserving SPMD annotations."""
+        if not isinstance(arg, torch.Tensor):
+            return arg
+        meta = torch.empty_like(arg, device="meta", requires_grad=arg.requires_grad)
+        if has_local_type(arg) or get_partition_spec(arg) is not None:
+            assert_type(
+                meta, get_local_type(arg), partition_spec=get_partition_spec(arg)
+            )
+        return meta
+
+    # Note: ``handle_torch_function`` pops the active ``_SpmdTypeMode`` off
+    # torch's TorchFunctionMode stack while ``typecheck_forward`` runs.  To
+    # have the decomposition's primitive aten ops re-dispatch through the
+    # checker, we re-enter the *same* mode via ``with current_mode:``.  The
+    # mode is reentrant: setup (autograd patch, vmap, backward hooks) is
+    # owned by ``typecheck()`` once per session, so re-pushing the mode
+    # only updates torch's mode stack -- no double-install.
+    def typecheck_forward(*args, **kwargs):
+        # Lazy import: runtime.py must not import _checker at module load.
+        from spmd_types._checker import _current_mode
+
+        current_mode = _current_mode()
+        assert current_mode is not None, (
+            f"{cls.__name__}.apply with register_decomposition requires an "
+            f"active typecheck() context.  (If a typecheck() context IS "
+            f"active, this means _SpmdTypeMode is on torch's stack but "
+            f"_current_mode is None -- typecheck() session bookkeeping is "
+            f"broken.)"
+        )
+
+        # 1. Trace the decomposition on meta tensors under the active mode.
+        #    Primitive aten ops propagate SPMD types / PartitionSpecs, but
+        #    the decomp does not allocate any storage.
+        meta_args = tree_map(_to_meta, args)
+        meta_kwargs = tree_map(_to_meta, kwargs)
+        with current_mode:
+            ref_out = ref_impl(*meta_args, **meta_kwargs)
+
+        # 2. Run the real computation path.
+        real_out = cls.apply(*args, **kwargs)
+
+        # 3. Copy the inferred SPMD types from the decomposition output onto the
+        #    real computation path output, walking both trees in parallel.
+        ref_flat, ref_spec = tree_flatten(ref_out)
+        real_flat, real_spec = tree_flatten(real_out)
+        if ref_spec != real_spec:
+            raise SpmdTypeError(
+                f"{cls.__name__}: decomposition output tree does not match "
+                f"real computation path output tree. "
+                f"decomposition: {ref_spec}, fused: {real_spec}"
+            )
+        for real_leaf, ref_leaf in zip(real_flat, ref_flat):
+            if not (
+                isinstance(real_leaf, torch.Tensor)
+                and isinstance(ref_leaf, torch.Tensor)
+            ):
+                continue
+            local_type = get_local_type(ref_leaf)
+            spec = get_partition_spec(ref_leaf)
+            if not local_type and spec is None:
+                continue
+            assert_type(real_leaf, local_type, partition_spec=spec)
+        return real_out
+
+    cls.typecheck_forward = staticmethod(typecheck_forward)
+    _TYPECHECK_AUTOGRAD_FUNCTIONS.add(cls)
+    return ref_impl

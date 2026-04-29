@@ -40,6 +40,27 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 
+# Module-level custom_op that simulates an opaque fused RMSNorm kernel.
+# Registered at module scope so re-running tests in the same process does
+# not trigger re-registration errors.
+@torch.library.custom_op(
+    "spmd_types_test::rmsnorm_fused_kernel_for_test",
+    mutates_args=(),
+)
+def _rmsnorm_fused_kernel_for_test(
+    x: torch.Tensor, w: torch.Tensor, eps: float
+) -> torch.Tensor:
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    return x * torch.rsqrt(variance + eps) * w
+
+
+@_rmsnorm_fused_kernel_for_test.register_fake
+def _rmsnorm_fused_kernel_for_test_fake(
+    x: torch.Tensor, w: torch.Tensor, eps: float
+) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 class TestEinsumTypePropagation(unittest.TestCase):
     """Test einsum type propagation rules.
 
@@ -1877,6 +1898,173 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         dummy = torch.zeros(4)  # {} typed tensor
         with self.assertRaises(SpmdTypeError):
             MixedOp.apply(x, dummy)
+
+
+class TestRegisterDecomposition(SpmdTypeCheckedTestCase):
+    """Test register_decomposition: derive SPMD types by tracing a
+    pure-PyTorch reference implementation through primitive rules.
+    """
+
+    def test_invalid_input_rejected_by_primitive_rules(self):
+        """SPMD errors surface naturally from primitive ops in the decomp."""
+        from spmd_types._checker import register_decomposition
+
+        class FusedOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x + 1.0
+
+            @staticmethod
+            def backward(ctx, g):
+                return g
+
+        def ref_impl(x):
+            # add(P, scalar) is affine on P -- rejected by primitive rule.
+            return x + 1.0
+
+        register_decomposition(FusedOp, ref_impl)
+
+        x = self._generate_inputs((4,), self.pg, P)
+        with self.assertRaises(SpmdTypeError):
+            FusedOp.apply(x)
+
+    def test_tuple_output_stamps_each_leaf(self):
+        """Decomposition with tuple output stamps every leaf."""
+        from spmd_types._checker import register_decomposition
+
+        class FusedOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, y):
+                return x + y, x - y
+
+            @staticmethod
+            def backward(ctx, g1, g2):
+                return g1 + g2, g1 - g2
+
+        def ref_impl(x, y):
+            return x + y, x - y
+
+        register_decomposition(FusedOp, ref_impl)
+
+        x = self._generate_inputs((4,), self.pg, V)
+        y = self._generate_inputs((4,), self.pg, R)
+        out1, out2 = FusedOp.apply(x, y)
+        self.assertIs(get_axis_local_type(out1, self.pg), V)
+        self.assertIs(get_axis_local_type(out2, self.pg), V)
+
+    def test_tree_structure_mismatch_raises(self):
+        """Mismatched tree shapes between decomp and fused output raise."""
+        from spmd_types._checker import register_decomposition
+
+        class FusedOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x + 1  # Single tensor.
+
+            @staticmethod
+            def backward(ctx, g):
+                return g
+
+        def ref_impl(x):
+            return x + 1, x - 1  # Tuple -- structure mismatch.
+
+        register_decomposition(FusedOp, ref_impl)
+
+        x = self._generate_inputs((4,), self.pg, R)
+        with self.assertRaises(SpmdTypeError):
+            FusedOp.apply(x)
+
+    def test_decorator_form(self):
+        """``@register_decomposition(cls)`` registers and returns the ref_impl."""
+        from spmd_types._checker import register_decomposition
+
+        class FusedOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                return x + 1.0
+
+            @staticmethod
+            def backward(ctx, g):
+                return g
+
+        @register_decomposition(FusedOp)
+        def ref_impl(x):
+            return x + 1.0
+
+        # Decorator returns ref_impl unchanged so the bound name is the function.
+        self.assertTrue(callable(ref_impl))
+        self.assertEqual(ref_impl.__name__, "ref_impl")
+        # Registration took effect: FusedOp now has a typecheck_forward that
+        # surfaces primitive-op SPMD errors (P + scalar is rejected).
+        x = self._generate_inputs((4,), self.pg, P)
+        with self.assertRaises(SpmdTypeError):
+            FusedOp.apply(x)
+
+
+class TestRegisterDecompositionGlobalSpmd(LocalTensorTestCase):
+    """``register_decomposition`` under global SPMD: primitive-op rules
+    propagate PartitionSpec through a RMSNorm-like decomposition and
+    reject sharding on the normalized dim.
+    """
+
+    WORLD_SIZE = 4
+
+    def setUp(self):
+        super().setUp()
+        self._tc_cm = typecheck(local=False)
+        self._tc_cm.__enter__()
+
+        from spmd_types._checker import register_decomposition
+
+        def _native_rms_norm(x, w, eps):
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            return x * torch.rsqrt(variance + eps) * w
+
+        class _RMSNormLike(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, w, eps):
+                return _rmsnorm_fused_kernel_for_test(x, w, eps)
+
+            @staticmethod
+            def backward(ctx, g):
+                return g, None, None
+
+        register_decomposition(_RMSNormLike, _native_rms_norm)
+        self.rmsnorm_like = _RMSNormLike.apply
+
+    def tearDown(self):
+        self._tc_cm.__exit__(None, None, None)
+        super().tearDown()
+
+    def test_replicated_input_stays_replicated(self):
+        """R input -> R output, no sharding introduced."""
+        x = torch.randn(8, 16)
+        w = torch.randn(16)
+        assert_type(x, {self.pg: R})
+        assert_type(w, {self.pg: R})
+        y = self.rmsnorm_like(x, w, 1e-6)
+        self.assertIs(get_axis_local_type(y, self.pg), R)
+
+    def test_shard_on_non_normalized_dim_propagates(self):
+        """S(0) (not the normalized last dim) propagates to the output."""
+        x = torch.randn(8, 16)
+        w = torch.randn(16)
+        assert_type(x, {self.pg: S(0)})
+        assert_type(w, {self.pg: R})
+        y = self.rmsnorm_like(x, w, 1e-6)
+        self.assertEqual(
+            get_partition_spec(y),
+            PartitionSpec(self.pg, None),
+        )
+
+    def test_shard_on_normalized_dim_rejected(self):
+        """Sharding the normalized (last) dim is rejected."""
+        x = torch.randn(8, 16)
+        w = torch.randn(16)
+        assert_type(x, {self.pg: S(1)})
+        assert_type(w, {self.pg: R})
+        with self.assertRaises((SpmdTypeError, ValueError)):
+            self.rmsnorm_like(x, w, 1e-6)
 
 
 class TestVmapWithSpmdTypeMode(unittest.TestCase):

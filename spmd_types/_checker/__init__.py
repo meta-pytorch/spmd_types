@@ -69,6 +69,7 @@ from spmd_types.runtime import (  # noqa: F401
     has_local_type,
     mutate_type,
     register_autograd_function,
+    register_decomposition,
     register_local_autograd_function,
     trace,
 )
@@ -2593,44 +2594,6 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
         self._disabled = False
 
-    def __enter__(self):
-        assert _current_mode() is None, (
-            "_SpmdTypeMode must only be entered via typecheck()"
-        )
-        # FIXME: the autograd patch mutates a global class attribute
-        # (torch.autograd.Function.apply).  If multiple threads enter/exit
-        # concurrently, one thread may remove the patch while another is
-        # still active.  This will need a lock + refcount when we support
-        # multi-threaded type checking.
-        _install_autograd_apply_patch()
-
-        # Patch vmap so BatchedTensors carry SPMD type annotations.
-        import spmd_types._vmap as _vmap
-
-        _vmap.install()
-
-        # Patch nn.Module backward-hook plumbing so registered hooks get
-        # SPMD type propagation (and unregistered ones raise).
-        import spmd_types._backward_hooks as _backward_hooks
-
-        _backward_hooks.install()
-
-        return super().__enter__()
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        result = super().__exit__(exc_type, exc_val, exc_tb)
-        _remove_autograd_apply_patch()
-
-        import spmd_types._vmap as _vmap
-
-        _vmap.uninstall()
-
-        import spmd_types._backward_hooks as _backward_hooks
-
-        _backward_hooks.uninstall()
-
-        return result
-
     def __torch_function__(self, func, types, args=(), kwargs=None):  # noqa: C901
         kwargs = kwargs or {}
         # Paused via no_typecheck(): run without type checking.
@@ -3054,16 +3017,39 @@ def typecheck(
             strict_mode = "strict"
         if local is None:
             local = True
+        # Session-wide setup: install monkey-patches that enable type
+        # checking for autograd Functions, vmap, and module backward hooks.
+        # These run once per outermost ``typecheck()`` activation, not on
+        # every nested mode push (so the mode itself stays reentrant).
+        # FIXME: the autograd patch mutates a global class attribute.  If
+        # multiple threads enter/exit concurrently, one thread may remove
+        # the patch while another is still active.  Needs a lock + refcount
+        # when we support multi-threaded type checking.
+        _install_autograd_apply_patch()
+        import spmd_types._vmap as _vmap
+
+        _vmap.install()
+        import spmd_types._backward_hooks as _backward_hooks
+
+        _backward_hooks.install()
+
+        import spmd_types._dtensor_checker  # noqa: F401
+
         mode = _SpmdTypeMode(
             strict_mode=strict_mode,
             local=local,
         )
-        with mode:
-            _set_current_mode(mode)
-            try:
-                yield
-            finally:
-                _set_current_mode(None)
+        try:
+            with mode:
+                _set_current_mode(mode)
+                try:
+                    yield
+                finally:
+                    _set_current_mode(None)
+        finally:
+            _backward_hooks.uninstall()
+            _vmap.uninstall()
+            _remove_autograd_apply_patch()
 
 
 from spmd_types._state import no_typecheck  # noqa: F401
