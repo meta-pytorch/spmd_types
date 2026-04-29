@@ -888,3 +888,94 @@ the mesh check applied to first-time annotation but not to verification,
 dp: R}` but fail on an unannotated tensor -- same call, different behavior
 depending on the tensor's history.  Keeping `assert_type` mesh-agnostic
 avoids this.
+
+# Low precision and autograd
+
+We would like to address the handling of low precision dtypes and autograd in
+our API design, rather than forcing the user to handle it directly.  Here are
+our primary constraints:
+
+* We need to support as easy porting path from `DTensor.redistribute`, which
+  supports `forward_dtype` and `backward_dtype` which induces a conversion
+  before the forward/backward collective (inside the autograd function).
+  This means we need to uniformly support something equivalent for both
+  collectives and local operations.
+
+* We want to support the FSDP pattern of performing an all-gather in lower
+  precision than the parameter's storage type.  We want the user to explicitly
+  specify the desired reduction dtype in backwards, as this case is subtle
+  and the desired choice varies between FSDP/CP/TP.
+
+* We are not going to introduce foundational changes to autograd; in
+  particular, we are going to abide by the constraint that forward and
+  backward dtype must match for all autograd nodes (this means that the API
+  support for divergent forward/backward dtype here *must* live inside an
+  autograd function, since it results in an illegal state on the outside.)
+
+* We are not going to introduce any custom collective implementations; we're
+  going to use stock NCCL for everything in our APIs.
+
+* We want to be able to capture any customization for communications in an
+  options dict, allowing for future extensibility as new knobs are added.
+
+Here is the general strategy:
+
+* Every collective accepts `op_dtype` and `out_dtype`.  These control
+  dtype conversions that happen before and after the operation.  When these
+  are not specified, we don't do conversions.  For collectives, think of
+  `op_dtype` as the "communication dtype"; for plain operations, think of it
+  as the "compute dtype".  When collectives do reductions, assume that those
+  reductions are done in `op_dtype` but we reserve the right to have more
+  fine-grained options for controlling reduction specifically.
+
+* Every API accepts `backward_options` dictionary.  This dictionary is
+  passed as is to the backward of the collective, and allows you to have
+  different communication dtype in forward and backward, e.g., as frequently
+  done for FSDP all gathers in reduced precision.  This dictionary itself
+  can accept a `backward_options` key allowing for double-backwards use
+  cases.
+
+* For analogy with DTensor.redistribute, `forward_dtype=x` corresponds to
+  `op_dtype=x`, and `backward_dtype=x` corresponds to `backward_options=dict(op_dtype=x)`.
+
+* When you perform a collective in reduced precision (either `op_dtype` or
+  `out_dtype` is not torch.float32) and its backward involves a reduction
+  (`all_reduce` or `reduce_scatter`), it is an error not to explicitly
+  specify `op_dtype` of backwards.  This is to encourage users to think about
+  the precision of their gradient reduction, as it is common, e.g., in FSDP,
+  that a low precision `all_gather` should be a single precision
+  `reduce_scatter` in backwards.  This affects `convert(I,R)`, `all_reduce(R)`
+  (backwards is `all_reduce`) and `all_gather(R)` (backwards is
+  `reduce_scatter).
+
+* When only `op_dtype` is specified, `out_dtype` is inferred to be `op_dtype`.
+
+* When only `out_dtype` is specified, we will infer `op_dtype` by the priority
+  of: (1) minimizing bandwidth over the wire, and then (2) minimizing compute,
+  subject to the constraint of bitwise equivalence (e.g., if you have
+  `all_reduce(float32_tensor, out_dtype=torch.bfloat16)`, we must not infer
+  `op_dtype=torch.bfloat16` as that will reduce the precision of the
+  reduction).  Concretely, if you have a low precision `out_dtype` for
+  `all_gather`, `all_to_all`, `convert(R,P)`, `convert(I,P)` or
+  `convert(V,P)`, we will default `op_dtype` to it (as these all are
+  non-reducing operations or have local shapes that get bigger).  But
+  we will keep the input dtype for `convert(R,V)` and `convert(I,V)` where
+  the operation makes the tensor smaller.
+
+* When neither `op_dtype` nor `out_dtype` are specified, no conversions occur.
+  In particular, if you ask us to `all_reduce` a low precision tensor, we will
+  go ahead and do that reduction in low precision without complaining. (We
+  only error on backwards, because it's less obvious that a reduction has
+  occurred.)
+
+* For `backward_options`, it is generally unnecessary to specify `out_dtype` as
+  it is inferred from the dtype of the input.  (Technically, the autograd
+  engine can take care of this conversion, but it's better for us to
+  explicitly specify it as it can be a marginal improvement in double
+  backwards situation.)  Because `out_dtype` has a direct inference, we can
+  use the standard inference algorithm for backwards `op_dtype`.
+
+* NB: this API allows the user to violate the priority of minimizing bandwidth
+  over wire, e.g., `all_gather(float32_tensor, op_dtype=torch.float32, out_dtype=torch.bfloat16)`
+  It is intentional to make this expressible and we will not warn/error on
+  code like this.
