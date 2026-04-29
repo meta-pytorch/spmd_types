@@ -436,6 +436,20 @@ class TestFactoryTensors(LocalTensorTestCase):
         with self.assertRaises(SpmdTypeError):
             dist.all_gather_into_tensor(output, z, group=pg)
 
+    def test_torch_tensor_auto_replicates_under_mesh(self):
+        """``torch.tensor`` is a factory: auto-R under an active mesh."""
+        mesh = init_device_mesh("cpu", (3,), mesh_dim_names=("tp",))
+        with set_current_mesh(mesh):
+            t = torch.tensor(0.5, dtype=torch.float32)
+        tp = mesh.get_group("tp")
+        self.assertIs(get_axis_local_type(t, tp), R)
+
+    def test_torch_tensor_with_scalar_propagates_type(self):
+        """``torch.tensor(Scalar)`` propagates the Scalar's annotation."""
+        s = Scalar(0.5, {self.pg: V})
+        t = torch.tensor(s, dtype=torch.float32)
+        self.assertIs(get_axis_local_type(t, self.pg), V)
+
 
 class TestFactoryTensorsPermissive(LocalTensorTestCase):
     """Test factory tensor behavior in permissive mode.

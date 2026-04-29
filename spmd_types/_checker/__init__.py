@@ -1253,6 +1253,7 @@ _DETERMINISTIC_FACTORIES: set[Callable] = {
     torch.linspace,
     torch.logspace,
     torch.eye,
+    torch.tensor,
 }
 
 
