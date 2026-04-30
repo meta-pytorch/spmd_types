@@ -1591,6 +1591,20 @@ class TestMutationTypeChecking(SpmdTypeCheckedTestCase):
         x.add_(y)
         self.assertIs(get_axis_local_type(x, self.pg), P)
 
+    # --- Regression: requires_grad must be read pre-op, not post-op ---
+
+    def test_inplace_add_r_v_with_grad_input_ok(self):
+        """R.add_(V_grad): autograd flips x.requires_grad to True post-op,
+        but the R->V exemption must read pre-op grad state.
+        """
+        x = self._generate_inputs((4,), self.pg, R)
+        y = self._generate_inputs((4,), self.pg, V)
+        y.requires_grad_(True)
+        self.assertFalse(x.requires_grad)
+        x.add_(y)
+        self.assertTrue(x.requires_grad)
+        self.assertIs(get_axis_local_type(x, self.pg), V)
+
     # --- In-place ops that would change type unsafely (still rejected) ---
 
     def test_out_kwarg_v_to_r_rejected(self):

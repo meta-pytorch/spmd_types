@@ -1193,11 +1193,13 @@ class _ArgInfo(NamedTuple):
             actually occurs.
         partition_specs: PartitionSpec for each tensor (same order as
             tensor_types). None for tensors without a PartitionSpec.
+        no_grads: Tensor ids with requires_grad=False
     """
 
     tensor_types: list[LocalSpmdType]
     raw_entries: list[_RawArgEntry]
     partition_specs: list[PartitionSpec | None]
+    no_grads: set[int]
 
 
 def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
@@ -1217,13 +1219,19 @@ def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
     tensor_types: list[LocalSpmdType] = []
     raw_entries: list[_RawArgEntry] = []
     partition_specs: list[PartitionSpec | None] = []
+    no_grads: set[int] = set()
 
     for arg in args:
         for t in _iter_tensors_in(arg):
             tensor_types.append(get_local_type(t))
             partition_specs.append(get_partition_spec(t))
+            if not t.requires_grad:
+                no_grads.add(id(t))
         raw_entries.append(_RawArgEntry(None, arg))
     for key, v in kwargs.items():
+        for t in _iter_tensors_in(v):
+            if not t.requires_grad:
+                no_grads.add(id(t))
         if key == "out":
             continue
         for t in _iter_tensors_in(v):
@@ -1235,6 +1243,7 @@ def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
         tensor_types,
         raw_entries,
         partition_specs,
+        no_grads,
     )
 
 
@@ -1445,6 +1454,7 @@ def _validate_mutation_types(
     func: Callable,
     mutated_tensors: list[torch.Tensor],
     output_type: LocalSpmdType,
+    no_grads: set[int],
 ) -> None:
     """Validate that mutated tensors' existing SPMD types match the output type.
 
@@ -1457,6 +1467,7 @@ def _validate_mutation_types(
         func: The torch function (for error messages).
         mutated_tensors: Tensors being mutated by this operation.
         output_type: The inferred output SPMD type.
+        no_grads: Inputs with ``requires_grad=False``
 
     Raises:
         SpmdTypeError: If any mutated tensor's type conflicts with output_type.
@@ -1473,8 +1484,9 @@ def _validate_mutation_types(
                 # now differs, which is exactly what V means.  We restrict
                 # this to tensors that do not require grad because in-place
                 # type changes on autograd leaves would silently alter the
-                # gradient type contract.
-                if old_typ in (R, I) and new_typ is V and not t.requires_grad:
+                # gradient type contract. Use the pre-op snapshot: autograd
+                # may have flipped t.requires_grad to True post-op.
+                if old_typ in (R, I) and new_typ is V and id(t) in no_grads:
                     continue
                 raise SpmdTypeError(
                     f"{func_name}: in-place/out operation would change "
@@ -2896,7 +2908,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                 # Validate mutation safety for in-place/out operations.
                 mutated = _get_mutated_tensors(func, args, kwargs, result)
                 if mutated:
-                    _validate_mutation_types(func, mutated, output_type)
+                    _validate_mutation_types(func, mutated, output_type, info.no_grads)
 
                 _set_result_type(result, output_type)
                 out = original_kwargs.get("out")
