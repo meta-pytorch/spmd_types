@@ -231,11 +231,28 @@ class _AllGatherStack(torch.autograd.Function):
         pg = axis
         x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
-        gathered = [torch.empty_like(x) for _ in range(world_size)]
-        _dist.dist.all_gather(gathered, x, group=pg)
-        return _apply_out_dtype(
-            torch.stack(gathered, dim=gather_dim), dtype_options.out_dtype
-        )
+        is_scalar = x.dim() == 0
+        if is_scalar:
+            x = x.unsqueeze(0)
+        out_shape = list(x.shape)
+        out_shape[0] *= world_size
+        out = torch.empty(out_shape, device=x.device, dtype=x.dtype)
+        _dist.dist.all_gather_into_tensor(out, x, group=pg)
+        # Stack semantics: insert a new dim of size world_size at gather_dim.
+        # NCCL concatenates along dim 0, so view to [world_size, *local_shape]
+        # then move the world_size dim into position.
+        gathered = out.view(world_size, *x.shape)
+        if gather_dim == 0:
+            result = gathered
+        elif all(s == 1 for s in x.shape[:gather_dim]):
+            result_shape = list(x.shape)
+            result_shape.insert(gather_dim, world_size)
+            result = gathered.view(result_shape)
+        else:
+            result = gathered.movedim(0, gather_dim).contiguous()
+        if is_scalar:
+            result = result.squeeze(-1)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -276,11 +293,16 @@ class _AllGatherShard(torch.autograd.Function):
         pg = axis
         x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
-        gathered = [torch.empty_like(x) for _ in range(world_size)]
-        _dist.dist.all_gather(gathered, x, group=pg)
-        return _apply_out_dtype(
-            torch.cat(gathered, dim=gather_dim), dtype_options.out_dtype
-        )
+        out_shape = list(x.shape)
+        out_shape[0] *= world_size
+        out = torch.empty(out_shape, device=x.device, dtype=x.dtype)
+        _dist.dist.all_gather_into_tensor(out, x, group=pg)
+        if gather_dim == 0:
+            result = out
+        else:
+            chunks = out.chunk(world_size, dim=0)
+            result = torch.cat(chunks, dim=gather_dim)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):

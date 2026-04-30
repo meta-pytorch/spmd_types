@@ -93,6 +93,7 @@ def _short_dtype(dt: torch.dtype) -> str:
 _C10D_MAP = {
     "c10d.allreduce_": "all_reduce",
     "c10d.allgather_": "all_gather",
+    "c10d._allgather_base_": "all_gather",
     "c10d._reduce_scatter_base_": "reduce_scatter",
     "c10d.reduce_scatter_": "reduce_scatter",
     "c10d.reduce_scatter_tensor": "reduce_scatter",
