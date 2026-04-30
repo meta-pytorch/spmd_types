@@ -12,6 +12,11 @@ from typing import List, Optional, TYPE_CHECKING
 
 import torch
 from spmd_types import _dist
+from spmd_types._dtype_utils import (
+    _apply_op_dtype,
+    _apply_out_dtype,
+    _process_dtype_options,
+)
 from spmd_types._local import convert, reinterpret
 from spmd_types._traceback import api_boundary
 from spmd_types.types import _canonicalize_shard, I, P, PerMeshAxisSpmdType, R, Shard, V
@@ -33,35 +38,56 @@ class _AllReduce(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, axis, dst, inplace):
+    def forward(ctx, x, axis, dst, inplace, dtype_options):
         ctx.axis = axis
         ctx.dst = dst
+        ctx.backward_options = dtype_options.backward_options
+        if inplace:
+            assert dtype_options.op_dtype == x.dtype
+        else:
+            x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         # TODO: check if contiguous assertion is really necessary
         assert x.is_contiguous(), "all_reduce input must be contiguous"
         # TODO: check if world_size == 1 short-circuit is really necessary
         if _dist.dist.get_world_size(pg) == 1:
             if inplace:
-                return x
-            return x.clone()
-        if inplace:
+                result = x
+            else:
+                result = x.clone()
+        elif inplace:
             _dist.dist.all_reduce(x, op=_dist.dist.ReduceOp.SUM, group=pg)
             ctx.mark_dirty(x)
-            return x
+            result = x
         else:
             result = x.clone()
             _dist.dist.all_reduce(result, op=_dist.dist.ReduceOp.SUM, group=pg)
+        if inplace:
+            assert dtype_options.out_dtype == result.dtype
             return result
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         if ctx.dst is R:
             # backward of P -> R is P -> R (same operation)
-            grad = all_reduce(grad_out, ctx.axis, src=P, dst=R)
+            grad = all_reduce(
+                grad_out,
+                ctx.axis,
+                src=P,
+                dst=R,
+                **ctx.backward_options,
+            )
         else:
             # backward of P -> I: convert(I,R) is identity but sets up autograd for double backward
-            grad = convert(grad_out, ctx.axis, src=I, dst=R)
-        return grad, None, None, None
+            grad = convert(
+                grad_out,
+                ctx.axis,
+                src=I,
+                dst=R,
+                **ctx.backward_options,
+            )
+        return grad, None, None, None, None
 
 
 @api_boundary
@@ -72,6 +98,9 @@ def all_reduce(
     src: PerMeshAxisSpmdType = P,
     dst: PerMeshAxisSpmdType,
     inplace: bool = False,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``all_reduce(x: Partial | Varying, mesh_axis, dst) -> Replicate | Invariant``
 
@@ -93,6 +122,12 @@ def all_reduce(
         dst: Destination type (R or I)
         inplace: If True, perform the all-reduce in-place on the input tensor
             using ``dist.all_reduce`` instead of allocating a new output tensor.
+        op_dtype: Cast input to this dtype before the operation (communication
+            dtype). When only ``op_dtype`` is specified, ``out_dtype`` defaults
+            to ``op_dtype``.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
+            Supports ``op_dtype``, ``out_dtype``, and ``backward_options`` keys.
 
     Returns:
         Tensor with R or I type depending on dst
@@ -143,6 +178,9 @@ def all_reduce(
             src=src,
             dst=dst,
             inplace=inplace,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     if src is not P:
         if src is V:
@@ -156,7 +194,17 @@ def all_reduce(
         else:
             raise ValueError(f"all_reduce src must be P, got {src}")
     if dst is R or dst is I:
-        return _AllReduce.apply(x, axis, dst, inplace)
+        dtype_options = _process_dtype_options(
+            op_dtype,
+            out_dtype,
+            backward_options,
+            reducing=True,
+            backward_has_reduction=(dst is R),
+            input_dtype=x.dtype,
+            requires_grad=x.requires_grad,
+            inplace=inplace,
+        )
+        return _AllReduce.apply(x, axis, dst, inplace, dtype_options)
     else:
         raise ValueError(f"all_reduce dst must be R or I, got {dst}")
 
@@ -174,26 +222,41 @@ class _AllGatherStack(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, axis, dst, gather_dim):
+    def forward(ctx, x, axis, dst, gather_dim, dtype_options):
         ctx.axis = axis
         ctx.dst = dst
         ctx.gather_dim = gather_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
         gathered = [torch.empty_like(x) for _ in range(world_size)]
         _dist.dist.all_gather(gathered, x, group=pg)
-        return torch.stack(gathered, dim=gather_dim)
+        return _apply_out_dtype(
+            torch.stack(gathered, dim=gather_dim), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
         if ctx.dst is R:
             grad = reduce_scatter(
-                grad_out, ctx.axis, src=P, dst=V, scatter_dim=ctx.gather_dim
+                grad_out,
+                ctx.axis,
+                src=P,
+                dst=V,
+                scatter_dim=ctx.gather_dim,
+                **ctx.backward_options,
             )
         else:
-            grad = convert(grad_out, ctx.axis, src=I, dst=V)
-        return grad, None, None, None
+            grad = convert(
+                grad_out,
+                ctx.axis,
+                src=I,
+                dst=V,
+                **ctx.backward_options,
+            )
+        return grad, None, None, None, None
 
 
 class _AllGatherShard(torch.autograd.Function):
@@ -204,16 +267,20 @@ class _AllGatherShard(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, axis, dst, gather_dim):
+    def forward(ctx, x, axis, dst, gather_dim, dtype_options):
         ctx.axis = axis
         ctx.dst = dst
         ctx.gather_dim = gather_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         x = x.contiguous()
         world_size = _dist.dist.get_world_size(pg)
         gathered = [torch.empty_like(x) for _ in range(world_size)]
         _dist.dist.all_gather(gathered, x, group=pg)
-        return torch.cat(gathered, dim=gather_dim)
+        return _apply_out_dtype(
+            torch.cat(gathered, dim=gather_dim), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -224,10 +291,17 @@ class _AllGatherShard(torch.autograd.Function):
                 src=P,
                 dst=Shard(ctx.gather_dim),
                 scatter_dim=ctx.gather_dim,
+                **ctx.backward_options,
             )
         else:
-            grad = convert(grad_out, ctx.axis, src=I, dst=Shard(ctx.gather_dim))
-        return grad, None, None, None
+            grad = convert(
+                grad_out,
+                ctx.axis,
+                src=I,
+                dst=Shard(ctx.gather_dim),
+                **ctx.backward_options,
+            )
+        return grad, None, None, None, None
 
 
 class _AllGatherUneven(torch.autograd.Function):
@@ -238,11 +312,13 @@ class _AllGatherUneven(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, axis, dst, gather_dim, split_sizes):
+    def forward(ctx, x, axis, dst, gather_dim, split_sizes, dtype_options):
         ctx.axis = axis
         ctx.dst = dst
         ctx.gather_dim = gather_dim
         ctx.split_sizes = split_sizes
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         ctx.rank = _dist.dist.get_rank(pg)
         x = x.contiguous()
@@ -252,7 +328,9 @@ class _AllGatherUneven(torch.autograd.Function):
             shape[gather_dim] = s
             gathered.append(torch.empty(shape, dtype=x.dtype, device=x.device))
         _dist.dist.all_gather(gathered, x, group=pg)
-        return torch.cat(gathered, dim=gather_dim)
+        return _apply_out_dtype(
+            torch.cat(gathered, dim=gather_dim), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -263,13 +341,25 @@ class _AllGatherUneven(torch.autograd.Function):
                 src=P,
                 dst=Shard(ctx.gather_dim),
                 split_sizes=ctx.split_sizes,
+                **ctx.backward_options,
             )
         else:
+            bw_dtype_options = _process_dtype_options(
+                ctx.backward_options.get("op_dtype"),
+                ctx.backward_options.get("out_dtype"),
+                ctx.backward_options.get("backward_options"),
+                reducing=False,
+                backward_has_reduction=False,
+                input_dtype=grad_out.dtype,
+                requires_grad=grad_out.requires_grad,
+            )
+            grad_out = _apply_op_dtype(grad_out, bw_dtype_options.op_dtype)
             chunks = list(
                 torch.split(grad_out, list(ctx.split_sizes), dim=ctx.gather_dim)
             )
             output = chunks[ctx.rank].contiguous()
-        return output, None, None, None, None
+            output = _apply_out_dtype(output, bw_dtype_options.out_dtype)
+        return output, None, None, None, None, None
 
 
 @api_boundary
@@ -280,6 +370,9 @@ def all_gather(
     src: PerMeshAxisSpmdType = V,
     dst: PerMeshAxisSpmdType,
     split_sizes: Optional[List[int]] = None,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``all_gather(x: Varying, mesh_axis, src, dst) -> Replicate | Invariant``
 
@@ -318,6 +411,12 @@ def all_gather(
         src: Source type (V or S(i)). When V, stacks on dim 0. When S(i), concatenates on dim i.
         dst: Destination type (R or I)
         split_sizes: Per-rank sizes for uneven gathering.
+        op_dtype: Cast input to this dtype before the operation (communication
+            dtype). When only ``op_dtype`` is specified, ``out_dtype`` defaults
+            to ``op_dtype``.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
+            Supports ``op_dtype``, ``out_dtype``, and ``backward_options`` keys.
 
     Returns:
         Tensor with R or I type depending on dst
@@ -365,6 +464,25 @@ def all_gather(
     computes each rank's logit-gradient partition locally with no
     communication.  Using ``dst=R`` would incorrectly insert a
     reduce-scatter.
+
+    **Low precision:**
+
+    On ``torch.float32`` inputs, the all-gather will be done in ``torch.float32``.
+    On low precision inputs, when ``dst=R``, a reduction will occur in backwards
+    and you must explicitly specify ``backward_options={"op_dtype": ...}`` to
+    control the precision of the gradient reduction.  The semantics of the
+    backwards will be to cast the gradient to this precision, perform the
+    reduction, and then cast back to the original gradient precision.
+    Currently, we do not support a memory-efficient implementation of reduction
+    in this case.
+
+    In uses of ``all_gather`` in settings like FSDP or CP, it is usually
+    recommended to run with ``backward_options={"op_dtype": torch.float32}``;
+    whereas in a TP setting, the number of participating ranks is smaller and
+    reduction in reduced precision can be acceptable.  If you need more
+    customization on how exactly the backwards reduction should be done, you are
+    welcome to write your own custom collective and give it the same type as
+    ``spmd.all_gather``.
     """
     if has_torch_function_unary(x):
         return handle_torch_function(
@@ -375,6 +493,9 @@ def all_gather(
             src=src,
             dst=dst,
             split_sizes=split_sizes,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Canonicalize negative Shard dims
     src = _canonicalize_shard(src, x.ndim)
@@ -391,11 +512,28 @@ def all_gather(
     gather_dim = src.dim if isinstance(src, Shard) else 0
     stack = src is V
     if dst is R or dst is I:
+        dtype_options = _process_dtype_options(
+            op_dtype,
+            out_dtype,
+            backward_options,
+            reducing=False,
+            backward_has_reduction=(dst is R),
+            input_dtype=x.dtype,
+            requires_grad=x.requires_grad,
+        )
         if split_sizes is not None:
-            return _AllGatherUneven.apply(x, axis, dst, gather_dim, split_sizes)
-        if stack:
-            return _AllGatherStack.apply(x, axis, dst, gather_dim)
-        return _AllGatherShard.apply(x, axis, dst, gather_dim)
+            return _AllGatherUneven.apply(
+                x,
+                axis,
+                dst,
+                gather_dim,
+                split_sizes,
+                dtype_options,
+            )
+        elif stack:
+            return _AllGatherStack.apply(x, axis, dst, gather_dim, dtype_options)
+        else:
+            return _AllGatherShard.apply(x, axis, dst, gather_dim, dtype_options)
     else:
         raise ValueError(f"all_gather dst must be R or I, got {dst}")
 
@@ -409,21 +547,24 @@ class _ReduceScatterStack(torch.autograd.Function):
     """reduce_scatter with stack semantics: P -> V, backward is all_gather(V,R): V -> R."""
 
     @staticmethod
-    def forward(ctx, x, axis, scatter_dim):
+    def forward(ctx, x, axis, scatter_dim, dtype_options):
         ctx.axis = axis
         ctx.scatter_dim = scatter_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         # x stacked on dim 0: shape[0] == world_size
         result = x.new_empty([1] + list(x.shape[1:]))
         _dist.dist.reduce_scatter_tensor(
             result, x, op=_dist.dist.ReduceOp.SUM, group=pg
         )
-        return result.squeeze(0)
+        return _apply_out_dtype(result.squeeze(0), dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         return (
-            all_gather(grad_out, ctx.axis, src=V, dst=R),
+            all_gather(grad_out, ctx.axis, src=V, dst=R, **ctx.backward_options),
+            None,
             None,
             None,
         )
@@ -433,9 +574,11 @@ class _ReduceScatterShard(torch.autograd.Function):
     """reduce_scatter with shard semantics: P -> S(i), backward is all_gather(S(i),R): S(i) -> R."""
 
     @staticmethod
-    def forward(ctx, x, axis, scatter_dim):
+    def forward(ctx, x, axis, scatter_dim, dtype_options):
         ctx.axis = axis
         ctx.scatter_dim = scatter_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
         # reduce_scatter_tensor always scatters along dim 0, so we
@@ -453,12 +596,19 @@ class _ReduceScatterShard(torch.autograd.Function):
 
         if needs_permute:
             result = result.movedim(0, scatter_dim)
-        return result
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         return (
-            all_gather(grad_out, ctx.axis, src=Shard(ctx.scatter_dim), dst=R),
+            all_gather(
+                grad_out,
+                ctx.axis,
+                src=Shard(ctx.scatter_dim),
+                dst=R,
+                **ctx.backward_options,
+            ),
+            None,
             None,
             None,
         )
@@ -468,16 +618,18 @@ class _ReduceScatterUneven(torch.autograd.Function):
     """reduce_scatter with uneven split_sizes: P -> S(i), backward is all_gather(S(i),R) with split_sizes."""
 
     @staticmethod
-    def forward(ctx, x, axis, scatter_dim, split_sizes):
+    def forward(ctx, x, axis, scatter_dim, split_sizes, dtype_options):
         ctx.axis = axis
         ctx.scatter_dim = scatter_dim
         ctx.split_sizes = split_sizes
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         ctx.rank = _dist.dist.get_rank(pg)
         x_list = list(torch.split(x, list(split_sizes), dim=scatter_dim))
         output = torch.empty_like(x_list[ctx.rank])
         _dist.dist.reduce_scatter(output, x_list, op=_dist.dist.ReduceOp.SUM, group=pg)
-        return output
+        return _apply_out_dtype(output, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -488,7 +640,9 @@ class _ReduceScatterUneven(torch.autograd.Function):
                 src=Shard(ctx.scatter_dim),
                 dst=R,
                 split_sizes=ctx.split_sizes,
+                **ctx.backward_options,
             ),
+            None,
             None,
             None,
             None,
@@ -504,6 +658,9 @@ def reduce_scatter(
     dst: PerMeshAxisSpmdType = V,
     scatter_dim: int | None = None,
     split_sizes: Optional[List[int]] = None,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``reduce_scatter(x, mesh_axis, dst): Partial -> Varying``
 
@@ -543,6 +700,12 @@ def reduce_scatter(
             dst is V; inferred from the shard dim when dst is S(i). If both
             scatter_dim and dst=S(i) are provided, they must agree.
         split_sizes: Per-rank sizes along ``scatter_dim`` for uneven scatter.
+        op_dtype: Cast input to this dtype before the operation (communication
+            dtype). When only ``op_dtype`` is specified, ``out_dtype`` defaults
+            to ``op_dtype``.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
+            Supports ``op_dtype``, ``out_dtype``, and ``backward_options`` keys.
 
     Returns:
         Tensor with V or S(i) type depending on dst
@@ -575,6 +738,9 @@ def reduce_scatter(
             dst=dst,
             scatter_dim=scatter_dim,
             split_sizes=split_sizes,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Canonicalize negative Shard dims
     dst = _canonicalize_shard(dst, x.ndim)
@@ -609,12 +775,28 @@ def reduce_scatter(
         if scatter_dim is None:
             scatter_dim = 0
 
+    dtype_options = _process_dtype_options(
+        op_dtype,
+        out_dtype,
+        backward_options,
+        reducing=True,
+        backward_has_reduction=False,
+        input_dtype=x.dtype,
+        requires_grad=x.requires_grad,
+    )
+
     if dst is V:
-        return _ReduceScatterStack.apply(x, axis, scatter_dim)
+        return _ReduceScatterStack.apply(x, axis, scatter_dim, dtype_options)
     elif split_sizes is not None:
-        return _ReduceScatterUneven.apply(x, axis, scatter_dim, split_sizes)
+        return _ReduceScatterUneven.apply(
+            x,
+            axis,
+            scatter_dim,
+            split_sizes,
+            dtype_options,
+        )
     else:
-        return _ReduceScatterShard.apply(x, axis, scatter_dim)
+        return _ReduceScatterShard.apply(x, axis, scatter_dim, dtype_options)
 
 
 # =============================================================================
@@ -626,17 +808,21 @@ class _AllToAllStack(torch.autograd.Function):
     """all_to_all with stack semantics: V -> V, backward is all_to_all(V,V) with swapped dims."""
 
     @staticmethod
-    def forward(ctx, x, axis, split_dim, concat_dim):
+    def forward(ctx, x, axis, split_dim, concat_dim, dtype_options):
         ctx.axis = axis
         ctx.split_dim = split_dim
         ctx.concat_dim = concat_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         input_chunks = list(torch.unbind(x, dim=split_dim))
         output_chunks = [
             torch.empty_like(input_chunks[0]) for _ in range(len(input_chunks))
         ]
         _dist.dist.all_to_all(output_chunks, input_chunks, group=pg)
-        return torch.stack(output_chunks, dim=concat_dim)
+        return _apply_out_dtype(
+            torch.stack(output_chunks, dim=concat_dim), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -647,16 +833,19 @@ class _AllToAllStack(torch.autograd.Function):
             dst=V,
             split_dim=ctx.concat_dim,
             concat_dim=ctx.split_dim,
+            **ctx.backward_options,
         )
-        return grad, None, None, None
+        return grad, None, None, None, None
 
 
 class _AllToAllUneven(torch.autograd.Function):
     """all_to_all with uneven split sizes on dim 0 for S(0) -> S(0)."""
 
     @staticmethod
-    def forward(ctx, x, axis, output_split_sizes, input_split_sizes):
+    def forward(ctx, x, axis, output_split_sizes, input_split_sizes, dtype_options):
         ctx.axis = axis
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
         if input_split_sizes is None:
@@ -673,7 +862,9 @@ class _AllToAllUneven(torch.autograd.Function):
             for s in output_split_sizes
         ]
         _dist.dist.all_to_all(output_chunks, input_chunks, group=pg)
-        return torch.cat(output_chunks, dim=0)
+        return _apply_out_dtype(
+            torch.cat(output_chunks, dim=0), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -685,18 +876,21 @@ class _AllToAllUneven(torch.autograd.Function):
             dst=Shard(0),
             output_split_sizes=ctx.input_split_sizes,
             input_split_sizes=ctx.output_split_sizes,
+            **ctx.backward_options,
         )
-        return grad, None, None, None
+        return grad, None, None, None, None
 
 
 class _AllToAllShard(torch.autograd.Function):
     """all_to_all with shard semantics: S(i) -> S(j), backward is all_to_all(S(j),S(i))."""
 
     @staticmethod
-    def forward(ctx, x, axis, split_dim, concat_dim):
+    def forward(ctx, x, axis, split_dim, concat_dim, dtype_options):
         ctx.axis = axis
         ctx.split_dim = split_dim
         ctx.concat_dim = concat_dim
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
         # TODO: support uneven splits by accepting explicit input/output
@@ -711,7 +905,9 @@ class _AllToAllShard(torch.autograd.Function):
         ]
         output_chunks = [torch.empty_like(input_chunks[0]) for _ in range(world_size)]
         _dist.dist.all_to_all(output_chunks, input_chunks, group=pg)
-        return torch.cat(output_chunks, dim=concat_dim)
+        return _apply_out_dtype(
+            torch.cat(output_chunks, dim=concat_dim), dtype_options.out_dtype
+        )
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -721,8 +917,9 @@ class _AllToAllShard(torch.autograd.Function):
             ctx.axis,
             src=Shard(ctx.split_dim),
             dst=Shard(ctx.concat_dim),
+            **ctx.backward_options,
         )
-        return grad, None, None, None
+        return grad, None, None, None, None
 
 
 @api_boundary
@@ -736,6 +933,9 @@ def all_to_all(
     concat_dim: int | None = None,
     output_split_sizes: Optional[List[int]] = None,
     input_split_sizes: Optional[List[int]] = None,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``all_to_all(x, mesh_axis, src, dst): Varying -> Varying``
 
@@ -789,6 +989,12 @@ def all_to_all(
             Only supported with src=S(0), dst=S(0). If None, defaults to
             even splits. Length must equal world_size and sum must equal
             x.shape[0].
+        op_dtype: Cast input to this dtype before the operation (communication
+            dtype). When only ``op_dtype`` is specified, ``out_dtype`` defaults
+            to ``op_dtype``.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
+            Supports ``op_dtype``, ``out_dtype``, and ``backward_options`` keys.
 
     Returns:
         Tensor with V or S(j) type depending on dst
@@ -819,6 +1025,9 @@ def all_to_all(
             concat_dim=concat_dim,
             output_split_sizes=output_split_sizes,
             input_split_sizes=input_split_sizes,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Canonicalize negative Shard dims
     src = _canonicalize_shard(src, x.ndim)
@@ -869,18 +1078,33 @@ def all_to_all(
         if concat_dim is None:
             concat_dim = 0
 
+    dtype_options = _process_dtype_options(
+        op_dtype,
+        out_dtype,
+        backward_options,
+        reducing=False,
+        backward_has_reduction=False,
+        input_dtype=x.dtype,
+        requires_grad=x.requires_grad,
+    )
+
     if output_split_sizes is not None or input_split_sizes is not None:
         if split_dim != 0 or concat_dim != 0:
             raise ValueError(
                 f"output_split_sizes/input_split_sizes only supported with "
                 f"src=S(0), dst=S(0), got src={src}, dst={dst}"
             )
-        return _AllToAllUneven.apply(x, axis, output_split_sizes, input_split_sizes)
-
-    if src is V and dst is V:
-        return _AllToAllStack.apply(x, axis, split_dim, concat_dim)
+        return _AllToAllUneven.apply(
+            x,
+            axis,
+            output_split_sizes,
+            input_split_sizes,
+            dtype_options,
+        )
+    elif src is V and dst is V:
+        return _AllToAllStack.apply(x, axis, split_dim, concat_dim, dtype_options)
     else:
-        return _AllToAllShard.apply(x, axis, split_dim, concat_dim)
+        return _AllToAllShard.apply(x, axis, split_dim, concat_dim, dtype_options)
 
 
 # =============================================================================
@@ -895,6 +1119,9 @@ def redistribute(  # noqa: C901
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """Semantics-preserving type change that allows comms.
 
@@ -921,6 +1148,9 @@ def redistribute(  # noqa: C901
         axis: The mesh axis to operate on (ProcessGroup)
         src: Source local SPMD type
         dst: Destination local SPMD type
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
     """
     if has_torch_function_unary(x):
         return handle_torch_function(
@@ -930,6 +1160,9 @@ def redistribute(  # noqa: C901
             axis,
             src=src,
             dst=dst,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Canonicalize negative Shard dims
     src = _canonicalize_shard(src, x.ndim)
@@ -951,45 +1184,153 @@ def redistribute(  # noqa: C901
     if src_base is dst_base:
         if src_is_shard and dst_is_shard and src.dim != dst.dim:
             # S(i) -> S(j): need all_to_all
-            return all_to_all(x, axis, src=src, dst=dst)
+            return all_to_all(
+                x,
+                axis,
+                src=src,
+                dst=dst,
+                op_dtype=op_dtype,
+                out_dtype=out_dtype,
+                backward_options=backward_options,
+            )
         return x  # no-op
 
     # Varying/Shard -> Replicate: all_gather
     if src_base is V and dst_base is R:
-        return all_gather(x, axis, src=src, dst=R)
-
+        return all_gather(
+            x,
+            axis,
+            src=src,
+            dst=R,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     # Varying/Shard -> Invariant: all_gather
     if src_base is V and dst_base is I:
-        return all_gather(x, axis, src=src, dst=I)
-
+        return all_gather(
+            x,
+            axis,
+            src=src,
+            dst=I,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     # Partial -> Replicate: all_reduce
     if src_base is P and dst_base is R:
-        return all_reduce(x, axis, src=P, dst=R)
-
+        return all_reduce(
+            x,
+            axis,
+            src=P,
+            dst=R,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     # Partial -> Invariant: all_reduce
     if src_base is P and dst_base is I:
-        return all_reduce(x, axis, src=P, dst=I)
-
+        return all_reduce(
+            x,
+            axis,
+            src=P,
+            dst=I,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     # Partial -> Varying/Shard: reduce_scatter
     if src_base is P and dst_base is V:
-        return reduce_scatter(x, axis, src=P, dst=dst, scatter_dim=dim)
+        return reduce_scatter(
+            x,
+            axis,
+            src=P,
+            dst=dst,
+            scatter_dim=dim,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
 
     # For non-comm conversions, delegate to convert
     # R -> I, I -> R, R -> V, R -> P, I -> V, I -> P, V -> P
     if src_base is R and dst_base is I:
-        return convert(x, axis, src=R, dst=I, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=R,
+            dst=I,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is I and dst_base is R:
-        return convert(x, axis, src=I, dst=R, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=I,
+            dst=R,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is R and dst_base is V:
-        return convert(x, axis, src=R, dst=dst, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=R,
+            dst=dst,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is R and dst_base is P:
-        return convert(x, axis, src=R, dst=P, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=R,
+            dst=P,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is I and dst_base is V:
-        return convert(x, axis, src=I, dst=dst, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=I,
+            dst=dst,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is I and dst_base is P:
-        return convert(x, axis, src=I, dst=P, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=I,
+            dst=P,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
     if src_base is V and dst_base is P:
-        return convert(x, axis, src=src, dst=P, expert_mode=True)
+        return convert(
+            x,
+            axis,
+            src=src,
+            dst=P,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
 
     raise ValueError(f"redistribute({src}, {dst}) is not supported.")
 
@@ -1000,6 +1341,9 @@ def unshard(
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """Convenience alias: ``unshard(S(i), dst)`` is ``all_gather(S(i), dst)``.
 
@@ -1011,7 +1355,18 @@ def unshard(
         axis: The mesh axis to gather over (ProcessGroup)
         src: Source shard type, must be S(i)
         dst: Destination type (R or I)
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward collective.
     """
     if not isinstance(src, Shard):
         raise ValueError(f"unshard src must be S(i), got {src}")
-    return all_gather(x, axis, src=src, dst=dst)
+    return all_gather(
+        x,
+        axis,
+        src=src,
+        dst=dst,
+        op_dtype=op_dtype,
+        out_dtype=out_dtype,
+        backward_options=backward_options,
+    )

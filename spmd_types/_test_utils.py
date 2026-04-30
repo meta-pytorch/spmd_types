@@ -99,7 +99,7 @@ class LocalTensorTestCase(FakeProcessGroupTestCase):
         """
         return self.mode.rank_map(cb)
 
-    def _generate_inputs(self, shape, axis, typ):
+    def _generate_inputs(self, shape, axis, typ, dtype=None):
         """Generate input tensor with the given SPMD type on the given axis.
 
         Data generation:
@@ -110,12 +110,13 @@ class LocalTensorTestCase(FakeProcessGroupTestCase):
             shape: The tensor shape to generate.
             axis: The mesh axis (ProcessGroup) to annotate the tensor on.
             typ: The SPMD type to assign (R, I, V, P, or S(i)).
+            dtype: Optional dtype for the generated tensor.
         """
         if typ is R or typ is I:
-            base = torch.randn(shape)
+            base = torch.randn(shape, dtype=dtype)
             result = self.rank_map(lambda r: base.clone())
         else:
-            result = self.rank_map(lambda r: torch.randn(shape))
+            result = self.rank_map(lambda r: torch.randn(shape, dtype=dtype))
         local_typ = V if isinstance(typ, Shard) else typ
         assert_type(result, {axis: local_typ})
         return result

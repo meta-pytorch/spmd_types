@@ -84,7 +84,7 @@ registrations.
 
 Never manually call `__enter__` / `__exit__` on context managers in tests. If a test needs a different setUp (e.g., permissive mode instead of strict mode, or no type checking at all), create a separate test class with the appropriate setUp instead of tearing down and re-entering context managers mid-test.
 
-Assume you are ALREADY in a conda env, no need to activate.
+Check if you are using system Python.  If so, you need to enter an environment; if there is guidance in your context about how to activate it follow that guidance.
 
 ```bash
 # Run all spmd_types tests

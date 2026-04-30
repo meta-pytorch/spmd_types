@@ -12,6 +12,12 @@ from typing import TYPE_CHECKING
 
 import torch
 from spmd_types import _dist
+from spmd_types._dtype_utils import (
+    _apply_op_dtype,
+    _apply_out_dtype,
+    _process_dtype_options,
+    _split_composition_dtype_options,
+)
 from spmd_types._traceback import api_boundary
 from spmd_types.types import _canonicalize_shard, I, P, PerMeshAxisSpmdType, R, Shard, V
 
@@ -68,72 +74,123 @@ class _ReplicateToVarying(torch.autograd.Function):
     """reinterpret(R,V): R -> V, backward is reinterpret(V,P): V -> P (no-op)."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
-        return x
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
+        return _apply_out_dtype(x, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # reinterpret(V,P) is a no-op in forward direction
-        return reinterpret(grad_out, ctx.axis, src=V, dst=P), None
+        return (
+            reinterpret(grad_out, ctx.axis, src=V, dst=P, **ctx.backward_options),
+            None,
+            None,
+        )
 
 
 class _ReplicateToInvariant(torch.autograd.Function):
     """convert(R,I): R -> I, backward is convert(I,P): I -> P."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
-        return x  # no-op in forward
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
+        return _apply_out_dtype(x, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # convert(I,P): I -> P
-        return convert(grad_out, ctx.axis, src=I, dst=P, expert_mode=True), None
+        return (
+            convert(
+                grad_out,
+                ctx.axis,
+                src=I,
+                dst=P,
+                expert_mode=True,
+                **ctx.backward_options,
+            ),
+            None,
+            None,
+        )
 
 
 class _InvariantToReplicate(torch.autograd.Function):
     """convert(I,R): I -> R, backward is all_reduce(I): P -> I."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
-        return x  # no-op in forward
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
+        return _apply_out_dtype(x, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # backward is all_reduce(I): P -> I
         from spmd_types._collectives import all_reduce  # @manual
 
-        return all_reduce(grad_out, ctx.axis, src=P, dst=I), None
+        return (
+            all_reduce(grad_out, ctx.axis, src=P, dst=I, **ctx.backward_options),
+            None,
+            None,
+        )
 
 
 class _VaryingToPartial(torch.autograd.Function):
     """reinterpret(V,P): V -> P, backward is reinterpret(R,V): R -> V (no-op)."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
-        return x  # no-op in forward
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
+        return _apply_out_dtype(x, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # reinterpret(R,V): R -> V
-        return reinterpret(grad_out, ctx.axis, src=R, dst=V, expert_mode=True), None
+        return (
+            reinterpret(
+                grad_out,
+                ctx.axis,
+                src=R,
+                dst=V,
+                expert_mode=True,
+                **ctx.backward_options,
+            ),
+            None,
+            None,
+        )
 
 
 class _ReplicateToPartial(torch.autograd.Function):
     """reinterpret(R,P): R -> P, backward is reinterpret(R,P): R -> P."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
-        return x  # no-op in forward
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
+        return _apply_out_dtype(x, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # reinterpret(R,P): R -> P (self-dual)
-        return reinterpret(grad_out, ctx.axis, src=R, dst=P, expert_mode=True), None
+        return (
+            reinterpret(
+                grad_out,
+                ctx.axis,
+                src=R,
+                dst=P,
+                expert_mode=True,
+                **ctx.backward_options,
+            ),
+            None,
+            None,
+        )
 
 
 @api_boundary
@@ -144,6 +201,9 @@ def reinterpret(  # noqa: C901
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
     expert_mode: bool = False,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``reinterpret(x, mesh_axis, src, dst)``
 
@@ -165,6 +225,9 @@ def reinterpret(  # noqa: C901
         axis: The mesh axis to operate on (ProcessGroup)
         src: Source local SPMD type (R, I, V, P)
         dst: Destination local SPMD type (R, I, V, P)
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward operation.
 
     **Supported coercions:**
 
@@ -250,6 +313,9 @@ def reinterpret(  # noqa: C901
             src=src,
             dst=dst,
             expert_mode=expert_mode,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Validate no Shard types
     if isinstance(src, Shard) or isinstance(dst, Shard):
@@ -289,24 +355,62 @@ def reinterpret(  # noqa: C901
                 "or convert(R, S(i)) instead."
             )
 
+    # Delegated cases: pass raw kwargs through to convert
+    if src is R and dst is I:
+        return convert(
+            x,
+            axis,
+            src=R,
+            dst=I,
+            expert_mode=True,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
+    if src is I and dst is R:
+        return convert(
+            x,
+            axis,
+            src=I,
+            dst=R,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
+
+    # Non-delegated cases: process dtype options and use autograd functions
+    dtype_options = _process_dtype_options(
+        op_dtype,
+        out_dtype,
+        backward_options,
+        reducing=False,
+        backward_has_reduction=False,
+        input_dtype=x.dtype,
+        requires_grad=x.requires_grad,
+    )
+
     if src is R and dst is V:
-        return _ReplicateToVarying.apply(x, axis)
-    elif src is R and dst is I:
-        # Delegate to convert, which is the primary API for I<->R transitions
-        return convert(x, axis, src=R, dst=I, expert_mode=True)
+        return _ReplicateToVarying.apply(x, axis, dtype_options)
     elif src is R and dst is P:
-        return _ReplicateToPartial.apply(x, axis)
-    elif src is I and dst is R:
-        # Delegate to convert, which is the primary API for I<->R transitions
-        return convert(x, axis, src=I, dst=R)
+        return _ReplicateToPartial.apply(x, axis, dtype_options)
     elif src is I and dst is V:
         # Composition: I -> R -> V
-        return _ReplicateToVarying.apply(_InvariantToReplicate.apply(x, axis), axis)
+        first_opts, second_opts = _split_composition_dtype_options(dtype_options)
+        return _ReplicateToVarying.apply(
+            _InvariantToReplicate.apply(x, axis, first_opts),
+            axis,
+            second_opts,
+        )
     elif src is I and dst is P:
         # Composition: I -> R -> P
-        return _ReplicateToPartial.apply(_InvariantToReplicate.apply(x, axis), axis)
+        first_opts, second_opts = _split_composition_dtype_options(dtype_options)
+        return _ReplicateToPartial.apply(
+            _InvariantToReplicate.apply(x, axis, first_opts),
+            axis,
+            second_opts,
+        )
     elif src is V and dst is P:
-        return _VaryingToPartial.apply(x, axis)
+        return _VaryingToPartial.apply(x, axis, dtype_options)
     else:
         if src is P:
             raise ValueError(
@@ -330,41 +434,45 @@ def reinterpret(  # noqa: C901
 # =============================================================================
 
 
-def _replicate_to_varying_fwd(x, world_size, split_dim, rank, *, stack):
-    """Forward: split and take local portion based on rank.
-
-    Args:
-        x: The replicated input tensor.
-        world_size: Number of ranks in the process group.
-        split_dim: The tensor dimension to split along.
-        rank: The current rank's index.
-        stack: If True, use select (unbind semantics) instead of chunk (shard semantics).
-    """
+@torch.library.custom_op("spmd_types::replicate_to_varying", mutates_args=())
+def _replicate_to_varying(
+    x: torch.Tensor, world_size: int, split_dim: int, rank: int, stack: bool
+) -> torch.Tensor:
+    """Forward: split and take local portion based on rank (never aliases input)."""
     if stack:
-        # NOTE: In stack semantics, when we do all-gather we create a new dim to stack
-        #       things on, and this one must be the same length as the rank.
-        #       Revisit this if we have other use cases.
         assert x.shape[split_dim] == world_size
-        return x.select(split_dim, rank).contiguous()
-    chunks = torch.chunk(x, world_size, dim=split_dim)
-    return chunks[rank].contiguous()
+        result = x.select(split_dim, rank).contiguous()
+    else:
+        chunks = torch.chunk(x, world_size, dim=split_dim)
+        result = chunks[rank].contiguous()
+    if result.untyped_storage() is x.untyped_storage():
+        return result._lazy_clone()
+    return result
 
 
-def _varying_to_partial_fwd(x, world_size, split_dim, rank, *, stack):
-    """Forward: pad with zeros, place data at rank position.
+@_replicate_to_varying.register_fake
+def _replicate_to_varying_fake(
+    x: torch.Tensor, world_size: int, split_dim: int, rank: int, stack: bool
+) -> torch.Tensor:
+    if stack:
+        shape = list(x.shape)
+        del shape[split_dim]
+        return x.new_empty(shape)
+    shape = list(x.shape)
+    shape[split_dim] = (shape[split_dim] + world_size - 1) // world_size
+    return x.new_empty(shape)
 
-    Args:
-        x: The varying input tensor (local shard).
-        world_size: Number of ranks in the process group.
-        split_dim: The tensor dimension to embed the shard into.
-        rank: The current rank's index.
-        stack: If True, use stack semantics (insert new dim) instead of concat semantics.
-    """
+
+@torch.library.custom_op("spmd_types::varying_to_partial", mutates_args=())
+def _varying_to_partial(
+    x: torch.Tensor, world_size: int, split_dim: int, rank: int, stack: bool
+) -> torch.Tensor:
+    """Forward: pad with zeros, place data at rank position."""
     if stack:
         pad_shape = list(x.shape)
         pad_shape.insert(split_dim, world_size)
         result = torch.zeros(pad_shape, dtype=x.dtype, device=x.device)
-        slices = [slice(None)] * len(pad_shape)
+        slices: list[int | slice] = [slice(None)] * len(pad_shape)
         slices[split_dim] = rank
         result[tuple(slices)] = x
         return result
@@ -372,23 +480,37 @@ def _varying_to_partial_fwd(x, world_size, split_dim, rank, *, stack):
     pad_shape[split_dim] = pad_shape[split_dim] * world_size
     result = torch.zeros(pad_shape, dtype=x.dtype, device=x.device)
     chunk_size = x.shape[split_dim]
-    slices = [slice(None)] * len(pad_shape)
-    slices[split_dim] = slice(rank * chunk_size, (rank + 1) * chunk_size)
-    result[tuple(slices)] = x
+    slices_c: list[int | slice] = [slice(None)] * len(pad_shape)
+    slices_c[split_dim] = slice(rank * chunk_size, (rank + 1) * chunk_size)
+    result[tuple(slices_c)] = x
     return result
 
 
-def _replicate_to_partial_fwd(x, rank):
-    """Forward: keep value on rank 0, zero elsewhere.
+@_varying_to_partial.register_fake
+def _varying_to_partial_fake(
+    x: torch.Tensor, world_size: int, split_dim: int, rank: int, stack: bool
+) -> torch.Tensor:
+    if stack:
+        shape = list(x.shape)
+        shape.insert(split_dim, world_size)
+        return x.new_empty(shape)
+    shape = list(x.shape)
+    shape[split_dim] = shape[split_dim] * world_size
+    return x.new_empty(shape)
 
-    Args:
-        x: The replicated input tensor.
-        rank: The current rank's index. Only rank 0 keeps its value.
-    """
+
+@torch.library.custom_op("spmd_types::replicate_to_partial", mutates_args=())
+def _replicate_to_partial(x: torch.Tensor, rank: int) -> torch.Tensor:
+    """Forward: keep value on rank 0, zero elsewhere."""
     if rank == 0:
         return x.clone()
     else:
         return torch.zeros_like(x)
+
+
+@_replicate_to_partial.register_fake
+def _replicate_to_partial_fake(x: torch.Tensor, rank: int) -> torch.Tensor:
+    return torch.empty_like(x)
 
 
 # =============================================================================
@@ -400,34 +522,43 @@ class _ConvertReplicateToVarying(torch.autograd.Function):
     """convert(R,V): R -> V, backward is convert(V,P): V -> P."""
 
     @staticmethod
-    def forward(ctx, x, axis, split_dim, stack):
+    def forward(ctx, x, axis, split_dim, stack, dtype_options):
         ctx.axis = axis
         ctx.split_dim = split_dim
         ctx.stack = stack
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
 
         mode = _get_local_tensor_mode(x)
         if mode is not None:
             r2l = _build_rank_to_group_local(pg)
-            return mode.tensor_map(
+            result = mode.tensor_map(
                 x,
-                lambda r, t: _replicate_to_varying_fwd(
-                    t, world_size, split_dim, r2l[r], stack=stack
+                lambda r, t: _replicate_to_varying(
+                    t, world_size, split_dim, r2l[r], stack
                 ),
             )
         else:
             rank = _dist.dist.get_rank(pg)
-            return _replicate_to_varying_fwd(
-                x, world_size, split_dim, rank, stack=stack
-            )
+            result = _replicate_to_varying(x, world_size, split_dim, rank, stack)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # convert(V/S(i),P): V -> P or S(i) -> P
         src = V if ctx.stack else Shard(ctx.split_dim)
         return (
-            convert(grad_out, ctx.axis, src=src, dst=P, expert_mode=True),
+            convert(
+                grad_out,
+                ctx.axis,
+                src=src,
+                dst=P,
+                expert_mode=True,
+                **ctx.backward_options,
+            ),
+            None,
             None,
             None,
             None,
@@ -438,27 +569,28 @@ class _ConvertInvariantToVarying(torch.autograd.Function):
     """convert(I,V): I -> V, backward is all_gather(I): V -> I."""
 
     @staticmethod
-    def forward(ctx, x, axis, split_dim, stack):
+    def forward(ctx, x, axis, split_dim, stack, dtype_options):
         ctx.axis = axis
         ctx.split_dim = split_dim
         ctx.stack = stack
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
 
         mode = _get_local_tensor_mode(x)
         if mode is not None:
             r2l = _build_rank_to_group_local(pg)
-            return mode.tensor_map(
+            result = mode.tensor_map(
                 x,
-                lambda r, t: _replicate_to_varying_fwd(
-                    t, world_size, split_dim, r2l[r], stack=stack
+                lambda r, t: _replicate_to_varying(
+                    t, world_size, split_dim, r2l[r], stack
                 ),
             )
         else:
             rank = _dist.dist.get_rank(pg)
-            return _replicate_to_varying_fwd(
-                x, world_size, split_dim, rank, stack=stack
-            )
+            result = _replicate_to_varying(x, world_size, split_dim, rank, stack)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -466,82 +598,124 @@ class _ConvertInvariantToVarying(torch.autograd.Function):
         from spmd_types._collectives import all_gather  # @manual
 
         src = V if ctx.stack else Shard(ctx.split_dim)
-        return all_gather(grad_out, ctx.axis, src=src, dst=I), None, None, None
+        return (
+            all_gather(
+                grad_out,
+                ctx.axis,
+                src=src,
+                dst=I,
+                **ctx.backward_options,
+            ),
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class _ConvertReplicateToPartial(torch.autograd.Function):
     """convert(R,P): R -> P, backward is convert(R,P): R -> P."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
 
         mode = _get_local_tensor_mode(x)
         if mode is not None:
             r2l = _build_rank_to_group_local(pg)
-            return mode.tensor_map(x, lambda r, t: _replicate_to_partial_fwd(t, r2l[r]))
+            result = mode.tensor_map(x, lambda r, t: _replicate_to_partial(t, r2l[r]))
         else:
             rank = _dist.dist.get_rank(pg)
-            return _replicate_to_partial_fwd(x, rank)
+            result = _replicate_to_partial(x, rank)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # convert(R,P): R -> P (self-dual)
-        return convert(grad_out, ctx.axis, src=R, dst=P), None
+        return (
+            convert(grad_out, ctx.axis, src=R, dst=P, **ctx.backward_options),
+            None,
+            None,
+        )
 
 
 class _ConvertInvariantToPartial(torch.autograd.Function):
     """convert(I,P): I -> P, backward is convert(R,I): R -> I (no-op)."""
 
     @staticmethod
-    def forward(ctx, x, axis):
+    def forward(ctx, x, axis, dtype_options):
         ctx.axis = axis
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
 
         mode = _get_local_tensor_mode(x)
         if mode is not None:
             r2l = _build_rank_to_group_local(pg)
-            return mode.tensor_map(x, lambda r, t: _replicate_to_partial_fwd(t, r2l[r]))
+            result = mode.tensor_map(x, lambda r, t: _replicate_to_partial(t, r2l[r]))
         else:
             rank = _dist.dist.get_rank(pg)
-            return _replicate_to_partial_fwd(x, rank)
+            result = _replicate_to_partial(x, rank)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # convert(R,I): R -> I
-        return convert(grad_out, ctx.axis, src=R, dst=I, expert_mode=True), None
+        return (
+            convert(
+                grad_out,
+                ctx.axis,
+                src=R,
+                dst=I,
+                expert_mode=True,
+                **ctx.backward_options,
+            ),
+            None,
+            None,
+        )
 
 
 class _ConvertVaryingToPartial(torch.autograd.Function):
     """convert(V,P): V -> P, backward is convert(R,V): R -> V."""
 
     @staticmethod
-    def forward(ctx, x, axis, split_dim, stack):
+    def forward(ctx, x, axis, split_dim, stack, dtype_options):
         ctx.axis = axis
         ctx.split_dim = split_dim
         ctx.stack = stack
+        ctx.backward_options = dtype_options.backward_options
+        x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         world_size = _dist.dist.get_world_size(pg)
 
         mode = _get_local_tensor_mode(x)
         if mode is not None:
             r2l = _build_rank_to_group_local(pg)
-            return mode.tensor_map(
+            result = mode.tensor_map(
                 x,
-                lambda r, t: _varying_to_partial_fwd(
-                    t, world_size, split_dim, r2l[r], stack=stack
+                lambda r, t: _varying_to_partial(
+                    t, world_size, split_dim, r2l[r], stack
                 ),
             )
         else:
             rank = _dist.dist.get_rank(pg)
-            return _varying_to_partial_fwd(x, world_size, split_dim, rank, stack=stack)
+            result = _varying_to_partial(x, world_size, split_dim, rank, stack)
+        return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
         # convert(R,V/S(i)): R -> V or R -> S(i)
         dst = V if ctx.stack else Shard(ctx.split_dim)
-        return convert(grad_out, ctx.axis, src=R, dst=dst), None, None, None
+        return (
+            convert(grad_out, ctx.axis, src=R, dst=dst, **ctx.backward_options),
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 @api_boundary
@@ -552,6 +726,9 @@ def convert(  # noqa: C901
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
     expert_mode: bool = False,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """``convert(x, mesh_axis, src, dst)``
 
@@ -582,6 +759,10 @@ def convert(  # noqa: C901
         dst: Destination local SPMD type (R, I, V, P, or S(i)).
              When src or dst is S(i), the split/concat dimension is
              derived from the shard index.  Plain V always uses dim 0.
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward operation.
+            Supports ``op_dtype``, ``out_dtype``, and ``backward_options`` keys.
 
     **Supported conversions:**
 
@@ -830,6 +1011,9 @@ def convert(  # noqa: C901
             src=src,
             dst=dst,
             expert_mode=expert_mode,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
         )
     # Canonicalize negative Shard dims
     src = _canonicalize_shard(src, x.ndim)
@@ -875,25 +1059,39 @@ def convert(  # noqa: C901
             )
         return x  # no-op
 
+    # R/I -> V/S(i): tensor gets smaller, keep input precision
+    reducing = (src_base is R or src_base is I) and dst_base is V
+    backward_has_reduction = src_base is I and dst_base is R
+
+    dtype_options = _process_dtype_options(
+        op_dtype,
+        out_dtype,
+        backward_options,
+        reducing=reducing,
+        backward_has_reduction=backward_has_reduction,
+        input_dtype=x.dtype,
+        requires_grad=x.requires_grad,
+    )
+
     if src_base is R and dst_base is V:
         stack = not isinstance(dst, Shard)
-        return _ConvertReplicateToVarying.apply(x, axis, dim, stack)
+        return _ConvertReplicateToVarying.apply(x, axis, dim, stack, dtype_options)
     elif src_base is R and dst_base is P:
-        return _ConvertReplicateToPartial.apply(x, axis)
+        return _ConvertReplicateToPartial.apply(x, axis, dtype_options)
     elif src_base is R and dst_base is I:
         # Same as reinterpret
-        return _ReplicateToInvariant.apply(x, axis)
+        return _ReplicateToInvariant.apply(x, axis, dtype_options)
     elif src_base is I and dst_base is V:
         stack = not isinstance(dst, Shard)
-        return _ConvertInvariantToVarying.apply(x, axis, dim, stack)
+        return _ConvertInvariantToVarying.apply(x, axis, dim, stack, dtype_options)
     elif src_base is I and dst_base is P:
-        return _ConvertInvariantToPartial.apply(x, axis)
+        return _ConvertInvariantToPartial.apply(x, axis, dtype_options)
     elif src_base is I and dst_base is R:
         # Same as reinterpret
-        return _InvariantToReplicate.apply(x, axis)
+        return _InvariantToReplicate.apply(x, axis, dtype_options)
     elif src_base is V and dst_base is P:
         stack = not isinstance(src, Shard)
-        return _ConvertVaryingToPartial.apply(x, axis, dim, stack)
+        return _ConvertVaryingToPartial.apply(x, axis, dim, stack, dtype_options)
     else:
         if src_base is P:
             if dst_base is R or dst_base is I:
@@ -920,6 +1118,9 @@ def shard(
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """Convenience alias: ``shard(src, S(i))`` is ``convert(src, S(i))``.
 
@@ -931,15 +1132,30 @@ def shard(
         axis: The mesh axis to operate on (ProcessGroup)
         src: Source local SPMD type (R or I)
         dst: Destination shard type, must be S(i)
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward operation.
     """
     if not isinstance(dst, Shard):
         raise ValueError(f"shard dst must be S(i), got {dst}")
-    return convert(x, axis, src=src, dst=dst)
+    return convert(
+        x,
+        axis,
+        src=src,
+        dst=dst,
+        op_dtype=op_dtype,
+        out_dtype=out_dtype,
+        backward_options=backward_options,
+    )
 
 
 def invariant_to_replicate(
     x,
     axis: ProcessGroup,
+    *,
+    op_dtype: torch.dtype | None = None,
+    out_dtype: torch.dtype | None = None,
+    backward_options: dict | None = None,
 ):
     """Convenience alias: ``invariant_to_replicate`` is ``convert(I, R)``.
 
@@ -960,6 +1176,9 @@ def invariant_to_replicate(
     Args:
         x: Input tensor with I type on the mesh axis
         axis: The mesh axis to operate on (ProcessGroup)
+        op_dtype: Cast input to this dtype before the operation.
+        out_dtype: Cast output to this dtype after the operation.
+        backward_options: Dict of options passed to the backward operation.
     """
     # Directly call the autograd function rather than going through
     # convert(), so that callers (e.g. copy_to_tensor_model_parallel_region)
@@ -967,5 +1186,22 @@ def invariant_to_replicate(
     # src/dst and trace into reinterpret's dispatch table.  This duplicates
     # the I->R case from reinterpret() intentionally for readability.
     if has_torch_function_unary(x):
-        return handle_torch_function(invariant_to_replicate, (x,), x, axis)
-    return _InvariantToReplicate.apply(x, axis)
+        return handle_torch_function(
+            invariant_to_replicate,
+            (x,),
+            x,
+            axis,
+            op_dtype=op_dtype,
+            out_dtype=out_dtype,
+            backward_options=backward_options,
+        )
+    dtype_options = _process_dtype_options(
+        op_dtype,
+        out_dtype,
+        backward_options,
+        reducing=False,
+        backward_has_reduction=True,
+        input_dtype=x.dtype,
+        requires_grad=x.requires_grad,
+    )
+    return _InvariantToReplicate.apply(x, axis, dtype_options)
