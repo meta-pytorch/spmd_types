@@ -391,6 +391,7 @@ def all_gather(
     *,
     src: PerMeshAxisSpmdType = V,
     dst: PerMeshAxisSpmdType,
+    gather_dim: int | None = None,
     split_sizes: Optional[List[int]] = None,
     op_dtype: torch.dtype | None = None,
     out_dtype: torch.dtype | None = None,
@@ -432,6 +433,9 @@ def all_gather(
         axis: The mesh axis to gather over (ProcessGroup)
         src: Source type (V or S(i)). When V, stacks on dim 0. When S(i), concatenates on dim i.
         dst: Destination type (R or I)
+        gather_dim: The tensor dimension to gather along. Defaults to 0 when
+            src is V; inferred from the shard dim when src is S(i). If both
+            gather_dim and src=S(i) are provided, they must agree.
         split_sizes: Per-rank sizes for uneven gathering.
         op_dtype: Cast input to this dtype before the operation (communication
             dtype). When only ``op_dtype`` is specified, ``out_dtype`` defaults
@@ -514,6 +518,7 @@ def all_gather(
             axis,
             src=src,
             dst=dst,
+            gather_dim=gather_dim,
             split_sizes=split_sizes,
             op_dtype=op_dtype,
             out_dtype=out_dtype,
@@ -531,7 +536,16 @@ def all_gather(
             f"all_gather split_sizes is only supported with src=S(i), got src={src}"
         )
 
-    gather_dim = src.dim if isinstance(src, Shard) else 0
+    if isinstance(src, Shard):
+        if gather_dim is not None and gather_dim != src.dim:
+            raise ValueError(
+                f"all_gather got gather_dim={gather_dim} but src=S({src.dim}); "
+                f"these conflict. Either use src=S({gather_dim}) or remove gather_dim."
+            )
+        gather_dim = src.dim
+    else:
+        if gather_dim is None:
+            gather_dim = 0
     stack = src is V
     if dst is R or dst is I:
         dtype_options = _process_dtype_options(
@@ -575,7 +589,10 @@ class _ReduceScatterStack(torch.autograd.Function):
         ctx.backward_options = dtype_options.backward_options
         x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
-        # x stacked on dim 0: shape[0] == world_size
+        # NCCL reduce_scatter_tensor always scatters along dim 0, so move
+        # scatter_dim into position 0 when it isn't already there.
+        if scatter_dim != 0:
+            x = x.movedim(scatter_dim, 0).contiguous()
         result = x.new_empty([1] + list(x.shape[1:]))
         _dist.dist.reduce_scatter_tensor(
             result, x, op=_dist.dist.ReduceOp.SUM, group=pg
@@ -585,7 +602,14 @@ class _ReduceScatterStack(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         return (
-            all_gather(grad_out, ctx.axis, src=V, dst=R, **ctx.backward_options),
+            all_gather(
+                grad_out,
+                ctx.axis,
+                src=V,
+                dst=R,
+                gather_dim=ctx.scatter_dim,
+                **ctx.backward_options,
+            ),
             None,
             None,
             None,

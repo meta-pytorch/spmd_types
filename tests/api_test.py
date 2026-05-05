@@ -417,6 +417,26 @@ class TestBackwardCorrectness(LocalTensorTestCase):
             dst_type=R,
         )
 
+    def test_backward_all_gather_v_to_r_gather_dim_1(self):
+        x = self._generate_inputs((2, 3), self.pg, V)
+        self.spmd_gradcheck(
+            lambda x: all_gather(x, self.pg, src=V, dst=R, gather_dim=1),
+            x,
+            axis=self.pg,
+            src_type=V,
+            dst_type=R,
+        )
+
+    def test_backward_all_gather_v_to_r_gather_dim_2(self):
+        x = self._generate_inputs((2, 3), self.pg, V)
+        self.spmd_gradcheck(
+            lambda x: all_gather(x, self.pg, src=V, dst=R, gather_dim=2),
+            x,
+            axis=self.pg,
+            src_type=V,
+            dst_type=R,
+        )
+
     def test_backward_all_gather_s0_to_r(self):
         x = self._generate_inputs((2,), self.pg, S(0))
         self.spmd_gradcheck(
@@ -453,6 +473,16 @@ class TestBackwardCorrectness(LocalTensorTestCase):
         x = self._generate_inputs((3, 4), self.pg, P)
         self.spmd_gradcheck(
             lambda x: reduce_scatter(x, self.pg, src=P, dst=V),
+            x,
+            axis=self.pg,
+            src_type=P,
+            dst_type=V,
+        )
+
+    def test_backward_reduce_scatter_p_to_v_scatter_dim_1(self):
+        x = self._generate_inputs((4, 3), self.pg, P)
+        self.spmd_gradcheck(
+            lambda x: reduce_scatter(x, self.pg, src=P, dst=V, scatter_dim=1),
             x,
             axis=self.pg,
             src_type=P,

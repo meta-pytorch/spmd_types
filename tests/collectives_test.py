@@ -644,6 +644,112 @@ class TestAllGatherMultiDim(LocalTensorTestCase):
         self.assertIs(get_axis_local_type(result, self.pg), R)
 
 
+class TestAllGatherStackGatherDim(LocalTensorTestCase):
+    """Test all_gather with src=V and non-zero gather_dim."""
+
+    def test_stack_gather_dim_1_movedim_path(self):
+        """gather_dim=1 on (2, 3) tensors exercises the movedim path."""
+        x = self.mode.rank_map(
+            lambda r: torch.arange(6, dtype=torch.float).reshape(2, 3) + r * 10
+        )
+        assert_type(x, {self.pg: V})
+
+        with typecheck():
+            result = all_gather(x, self.pg, src=V, dst=R, gather_dim=1)
+
+        # Stack at dim=1: (2, 3) per rank -> (2, world_size, 3)
+        expected = torch.stack(
+            [
+                torch.arange(6, dtype=torch.float).reshape(2, 3) + r * 10
+                for r in range(self.WORLD_SIZE)
+            ],
+            dim=1,
+        )
+        self.assertEqual(result._local_tensors[0].shape, (2, 3, 3))
+        self._assert_all_ranks_equal(result)
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(result._local_tensors[r], expected)
+        self.assertIs(get_axis_local_type(result, self.pg), R)
+
+    def test_stack_gather_dim_2(self):
+        """gather_dim=2 on (2, 3) tensors -> (2, 3, world_size)."""
+        x = self.mode.rank_map(
+            lambda r: torch.arange(6, dtype=torch.float).reshape(2, 3) + r * 10
+        )
+        assert_type(x, {self.pg: V})
+
+        with typecheck():
+            result = all_gather(x, self.pg, src=V, dst=R, gather_dim=2)
+
+        expected = torch.stack(
+            [
+                torch.arange(6, dtype=torch.float).reshape(2, 3) + r * 10
+                for r in range(self.WORLD_SIZE)
+            ],
+            dim=2,
+        )
+        self.assertEqual(result._local_tensors[0].shape, (2, 3, 3))
+        self._assert_all_ranks_equal(result)
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(result._local_tensors[r], expected)
+        self.assertIs(get_axis_local_type(result, self.pg), R)
+
+    def test_stack_gather_dim_1_view_optimization(self):
+        """gather_dim=1 on (1, 4) tensors exercises the view optimization path.
+
+        When all dims before gather_dim are 1, the view path is taken
+        instead of movedim.
+        """
+        x = self.mode.rank_map(
+            lambda r: torch.tensor(
+                [[float(r), float(r) + 0.5, float(r) + 1.0, float(r) + 1.5]]
+            )
+        )
+        assert_type(x, {self.pg: V})
+
+        with typecheck():
+            result = all_gather(x, self.pg, src=V, dst=R, gather_dim=1)
+
+        # (1, 4) per rank -> (1, world_size, 4)
+        expected = torch.stack(
+            [
+                torch.tensor(
+                    [[float(r), float(r) + 0.5, float(r) + 1.0, float(r) + 1.5]]
+                )
+                for r in range(self.WORLD_SIZE)
+            ],
+            dim=1,
+        )
+        self.assertEqual(result._local_tensors[0].shape, (1, 3, 4))
+        self._assert_all_ranks_equal(result)
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(result._local_tensors[r], expected)
+        self.assertIs(get_axis_local_type(result, self.pg), R)
+
+    def test_stack_gather_dim_0_is_default(self):
+        """Explicit gather_dim=0 matches the default behavior."""
+        x = self.mode.rank_map(lambda r: torch.full((2, 2), float(r)))
+        assert_type(x, {self.pg: V})
+
+        with typecheck():
+            explicit = all_gather(x, self.pg, src=V, dst=R, gather_dim=0)
+            default = all_gather(x, self.pg, src=V, dst=R)
+
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(
+                explicit._local_tensors[r], default._local_tensors[r]
+            )
+
+    def test_gather_dim_conflicts_with_shard(self):
+        """gather_dim that disagrees with S(i) raises ValueError."""
+        x = self.mode.rank_map(lambda r: torch.tensor([[float(r)], [float(r + 10)]]))
+        assert_type(x, {self.pg: V})
+
+        with self.assertRaises(ValueError) as ctx:
+            all_gather(x, self.pg, src=S(1), dst=R, gather_dim=0)
+        self.assertIn("conflict", str(ctx.exception))
+
+
 class TestAllToAllMultiDim(LocalTensorTestCase):
     """Test all_to_all with different split/concat dimensions."""
 
