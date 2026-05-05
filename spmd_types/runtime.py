@@ -28,12 +28,13 @@ import builtins
 import logging
 import os
 from contextlib import contextmanager
+from typing import Any, TypeAlias
 
 import torch
 from spmd_types._frame import _get_user_frame
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
-from spmd_types._state import current_mesh
+from spmd_types._state import current_mesh, is_type_checking, no_typecheck
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import (
     _LOCAL_TYPE_ATTR,
@@ -827,3 +828,216 @@ def register_decomposition(
     cls.typecheck_forward = staticmethod(typecheck_forward)
     _TYPECHECK_AUTOGRAD_FUNCTIONS.add(cls)
     return ref_impl
+
+
+# =============================================================================
+# local_map
+# =============================================================================
+
+
+class _InferType:
+    """Type of the ``Infer`` sentinel.  See ``local_map`` for semantics."""
+
+    def __repr__(self) -> str:
+        return "Infer"
+
+
+Infer = _InferType()
+
+
+_LocalMapSpecLeaf: TypeAlias = (
+    "PerMeshAxisSpmdTypes "
+    "| PartitionSpec "
+    "| tuple[PerMeshAxisSpmdTypes, PartitionSpec | None] "
+    "| None"
+)
+
+
+def local_map(  # noqa: C901
+    *,
+    in_types: Any = Infer,
+    out_types: Any,
+):
+    """Decorator that wraps a function whose body the SPMD type checker
+    can't reason about -- data-dependent ops (e.g. ``searchsorted``), custom
+    kernels, manual shard manipulations (e.g. ring attention). Inside ``fn``,
+    type checking is suspended; ``local_map`` re-establishes SPMD types at the
+    boundary:
+
+    * On **entry**, each input is checked against ``in_types``.  The tensor's
+      existing SPMD type must be consistent with what's declared
+      (``assert_type``-style refinement -- compatible existing types are
+      preserved, conflicts raise).  When ``in_types=Infer`` (the default),
+      inputs flow through unchecked, trusting whatever the caller already
+      annotated.
+
+    * On **return**, each output is assigned the SPMD type declared by
+      ``out_types``.  The body produces tensors with no SPMD types of their own
+      (because type checking was suspended), so this is what makes them usable
+      in the surrounding typed code.
+
+    Forward-only: gradient types are not part of the contract.  Inspired by
+    ``torch.distributed.local_map``.
+
+    ``in_types`` is either the bare sentinel ``Infer`` (the default) or a pytree
+    mirroring the structure of the function's positional arguments.
+    ``out_types`` is always a pytree mirroring the return value.
+
+    Each spec leaf is one of:
+
+    * ``dict[axis, type]`` -- per-axis local SPMD type (``R``/``I``/``V``/ ``P``
+      or ``S(i)``).  ``S(i)`` decays to ``V`` + ``PartitionSpec`` automatically
+      (see ``assert_type``).
+    * ``PartitionSpec`` -- only the partition spec; local types (V) are inferred
+      from the spec's axes.  Use this when you only care about which dim is
+      sharded and don't need to constrain replicate / invariant axes explicitly.
+    * ``(dict[axis, type], PartitionSpec | None)`` -- the dict plus an explicit
+      ``PartitionSpec``.  Cannot mix ``S(i)`` entries with an explicit
+      ``PartitionSpec``.
+    * ``None`` -- assert the leaf is non-tensor (int, float, ...).  Raises if a
+      tensor reaches this position.
+
+    ``Infer`` is **only** valid as the bare value of ``in_types`` (the default)
+    -- it short-circuits the entire input pass with no boundary checks at all.
+    ``Infer`` anywhere as a leaf in an ``in_types`` or ``out_types`` pytree
+    raises ``SpmdTypeError``: the caller must always state the contract
+    leaf-by-leaf.
+
+    Mismatches in pytree structure, tensor/non-tensor alignment, local type, or
+    ``PartitionSpec`` raise ``SpmdTypeError``.
+
+    Example -- typical usage just states the output contract; ``in_types``
+    defaults to ``Infer`` so the caller's existing input annotations flow
+    through unchanged::
+
+        @spmd.local_map(out_types=PartitionSpec(None, ddp))
+        def local_fn(x, w):
+            return x @ w
+
+    When args are nested, ``in_types`` / ``out_types`` mirror that nesting.
+    Spec leaves sit wherever args have leaves -- the alignment is purely
+    structural::
+
+        @spmd.local_map(
+            in_types=({ddp: S(0)}, [{ddp: R}, {ddp: R}]),
+            out_types=({ddp: S(0)}, {ddp: S(0)}),
+        )
+        def fn(x, weights):
+            return x @ weights[0], x @ weights[1]
+    """
+    import functools
+
+    from torch.utils._pytree import tree_map
+
+    def decorator(fn):
+        prefix = f"local_map[{fn.__qualname__}]"
+
+        def _check_arg(arg: object, spec: _LocalMapSpecLeaf, kind: str) -> None:
+            if spec is None:
+                if isinstance(arg, torch.Tensor):
+                    raise SpmdTypeError(
+                        f"{prefix}: a {kind} is a tensor but its "
+                        f"{kind}_types leaf is None (non-tensor expected)"
+                    )
+                return
+            # Explicit dict / (dict, ps) / PartitionSpec specs require a tensor.
+            if not isinstance(arg, torch.Tensor):
+                raise SpmdTypeError(
+                    f"{prefix}: a {kind} is not a tensor but its "
+                    f"{kind}_types leaf = {spec!r}"
+                )
+
+        def _assert_spec(arg: torch.Tensor, spec: _LocalMapSpecLeaf) -> None:
+            """Assert that ``arg`` satisfies ``spec`` via ``assert_type``.
+
+            On input, the call is a refinement check -- ``assert_type``
+            verifies the existing type/spec on the tensor is consistent
+            with ``spec`` (and may enrich it with new axes, but does not
+            change types that are already set).  On output, it stamps the
+            declared type/spec onto the otherwise-untyped body result.
+
+            Errors from ``assert_type`` propagate as-is; the call stack
+            already shows which ``local_map``-wrapped function and which
+            boundary the failure came from.  Leaves that don't match any
+            of the recognized spec shapes raise ``SpmdTypeError`` here.
+            """
+            # Check ``PartitionSpec`` before generic ``tuple`` since
+            # PartitionSpec is itself a tuple subclass.
+            if isinstance(spec, PartitionSpec):
+                # PartitionSpec-only leaf: assert_type derives V on each axis
+                # mentioned in the spec.
+                local_type, pspec = {}, spec
+            elif isinstance(spec, tuple):
+                local_type, pspec = spec
+            elif isinstance(spec, dict):
+                local_type, pspec = spec, None
+            else:
+                raise SpmdTypeError(
+                    f"{prefix}: invalid spec leaf {spec!r}; expected "
+                    f"a per-axis dict, a (dict, PartitionSpec | None) "
+                    f"tuple, a PartitionSpec, or None."
+                )
+            assert_type(arg, local_type, partition_spec=pspec)
+
+        def _walk_boundary(values: object, specs: Any, kind: str) -> None:
+            """Walk ``values``'s pytree and align ``specs`` along its leaves.
+
+            ``values``'s structure is the prototype: wherever it has a leaf
+            (a tensor or any non-container value), the corresponding
+            subtree of ``specs`` is treated as a spec leaf and handed to
+            ``_check_arg`` / ``_assert_spec``.  No duck-typing on what
+            "looks like" a spec dict -- alignment is purely structural.
+
+            ``Infer`` reaching this point is always at a leaf (the bare
+            ``in_types=Infer`` case is short-circuited above) and is
+            misuse -- it raises here.
+            """
+
+            def _check(val: object, spec: object) -> object:
+                if spec is Infer:
+                    # Bare ``in_types=Infer`` is short-circuited before we
+                    # reach here, so any ``Infer`` at this point is at a
+                    # pytree leaf, which is misuse.
+                    raise SpmdTypeError(
+                        f"{prefix}: {kind}_types contains Infer at a leaf; "
+                        f"only the bare value of in_types may be Infer."
+                    )
+                _check_arg(val, spec, kind)
+                if spec is not None:
+                    _assert_spec(val, spec)  # pyre-ignore[6]
+                return val
+
+            try:
+                tree_map(_check, values, specs)
+            except ValueError as e:
+                raise SpmdTypeError(
+                    f"{prefix}: {kind}_types pytree structure does not "
+                    f"match {kind}: {e}"
+                ) from None
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            # Fast path: with no active typecheck (or inside ``no_typecheck``).
+            if not is_type_checking():
+                return fn(*args, **kwargs)
+
+            # Boundary input checks run in the caller's typecheck environment
+            # (whatever mode is active when the wrapped fn is called), so
+            # ``assert_type`` sees the same global/local SPMD context as the
+            # caller -- only the body below is scoped under ``no_typecheck()``.
+            #
+            # Bare ``in_types=Infer`` short-circuits the entire input pass;
+            # any ``Infer`` reaching ``_walk_boundary`` is a leaf-level misuse
+            # and raises there.
+            if in_types is not Infer:
+                _walk_boundary(args, in_types, "input")
+
+            with no_typecheck():
+                result = fn(*args, **kwargs)
+
+            _walk_boundary(result, out_types, "output")
+            return result
+
+        return wrapper
+
+    return decorator

@@ -17,7 +17,7 @@ import unittest
 import expecttest
 import torch
 import torch.distributed as dist
-from spmd_types import I, P, R, S, Scalar, set_current_mesh, V
+from spmd_types import I, Infer, local_map, P, R, S, Scalar, set_current_mesh, V
 from spmd_types._checker import (
     _trace_logger,
     _validate_partition_spec_for_global_spmd,
@@ -3185,6 +3185,182 @@ class TestScalarWithPartitionSpec(SpmdTypeCheckedTestCase):
         assert_type(x, {self.pg: S(1)})
         result = torch.narrow(x, 1, Scalar(0, {self.pg: V}), Scalar(4, {self.pg: V}))
         self.assertIs(get_axis_local_type(result, self.pg), V)
+
+
+class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
+    """Tests for ``local_map``."""
+
+    def test_basic(self):
+        """Validates inputs, runs body opaquely, stamps outputs (local type + PartitionSpec)."""
+        with typecheck():
+            x = self._generate_inputs((4, 3), self.pg, S(0))
+            w = self._generate_inputs((3, 5), self.pg, R)
+
+            @local_map(
+                in_types=({self.pg: S(0)}, {self.pg: R}),
+                # Wrong on purpose: shows no spmd type propagates inside fn.
+                out_types={self.pg: S(1)},
+            )
+            def fn(x, w):
+                return x @ w
+
+            y = fn(x, w)
+            self.assertIs(get_axis_local_type(y, self.pg), V)
+            self.assertEqual(get_partition_spec(y), PartitionSpec(None, self.pg))
+
+    def test_pytree_flatten(self):
+        """``in_types`` / ``out_types`` mirror the structure of args / return."""
+        with typecheck():
+            x = self._generate_inputs((4, 6), self.pg, S(0))
+            w1 = self._generate_inputs((6, 5), self.pg, R)
+            w2 = self._generate_inputs((6, 5), self.pg, R)
+
+            @local_map(
+                in_types=({self.pg: S(0)}, [{self.pg: R}, {self.pg: R}]),
+                out_types=({self.pg: S(0)}, {self.pg: S(0)}),
+            )
+            def fn(x, weights):
+                return x @ weights[0], x @ weights[1]
+
+            a, b = fn(x, [w1, w2])
+            for t in (a, b):
+                self.assertIs(get_axis_local_type(t, self.pg), V)
+                self.assertEqual(get_partition_spec(t), PartitionSpec(self.pg, None))
+
+    def test_explicit_partition_spec_and_non_tensor(self):
+        """Tuple spec carries an explicit ``PartitionSpec``; ``None`` skips a non-tensor arg."""
+        with typecheck():
+            x = self.rank_map(lambda r: torch.randn(4, 3))
+            assert_type(x, {self.pg: S(0)})  # V + PartitionSpec(self.pg, None)
+
+            @local_map(
+                in_types=(({self.pg: V}, PartitionSpec(self.pg, None)), None),
+                out_types=({self.pg: V}, PartitionSpec(None, None, self.pg)),
+            )
+            def fn(x, scale):
+                # [4, 3] -> scale -> unsqueeze -> transpose so the sharded dim
+                # ends up on axis 2 (where the output PartitionSpec expects).
+                return (x * scale).unsqueeze(0).transpose(1, 2)
+
+            y = fn(x, 2.0)
+            self.assertIs(get_axis_local_type(y, self.pg), V)
+            self.assertEqual(get_partition_spec(y), PartitionSpec(None, None, self.pg))
+
+    def test_bare_partition_spec_leaf(self):
+        """Bare ``PartitionSpec`` leaf -- local type V is inferred from the spec."""
+        with typecheck():
+            x = self.rank_map(lambda r: torch.randn(4, 3))
+            assert_type(x, {self.pg: S(0)})  # V + PartitionSpec(self.pg, None)
+
+            @local_map(
+                in_types=(PartitionSpec(self.pg, None), None),
+                out_types=PartitionSpec(None, None, self.pg),
+            )
+            def fn(x, scale):
+                return (x * scale).unsqueeze(0).transpose(1, 2)
+
+            y = fn(x, 2.0)
+            # Output stamp: V on self.pg with the declared PartitionSpec.
+            self.assertIs(get_axis_local_type(y, self.pg), V)
+            self.assertEqual(get_partition_spec(y), PartitionSpec(None, None, self.pg))
+
+    def test_infer_input_default(self):
+        """``in_types`` defaults to bare ``Infer`` broadcast: no input checks.
+
+        Mixed tensor/non-tensor args still pass through without complaint.
+        """
+        with typecheck():
+            x = self._generate_inputs((4, 3), self.pg, R)
+
+            @local_map(out_types={self.pg: R})
+            def fn(x, scale):
+                return x * scale
+
+            y = fn(x, 2.0)
+            self.assertIs(get_axis_local_type(y, self.pg), R)
+
+    def test_infer_rejected_at_leaves(self):
+        """``Infer`` is only valid as the bare value of ``in_types``; at a
+        leaf -- in either ``in_types`` or ``out_types`` -- it raises."""
+        with typecheck():
+            x = self._generate_inputs((4, 3), self.pg, R)
+
+            # Infer at an in_types leaf: rejected.
+            @local_map(in_types=(Infer,), out_types={self.pg: R})
+            def infer_leaf_in(x):
+                return x.clone()
+
+            with self.assertRaises(SpmdTypeError) as ctx:
+                infer_leaf_in(x)
+            self.assertExpectedInline(
+                str(ctx.exception),
+                """local_map[TestLocalMap.test_infer_rejected_at_leaves.<locals>.infer_leaf_in]: input_types contains Infer at a leaf; only the bare value of in_types may be Infer.""",
+            )
+
+            # Infer in out_types (bare or as a leaf): rejected.
+            @local_map(in_types=({self.pg: R},), out_types=Infer)
+            def infer_bare_out(x):
+                return x.clone()
+
+            with self.assertRaises(SpmdTypeError) as ctx:
+                infer_bare_out(x)
+            self.assertExpectedInline(
+                str(ctx.exception),
+                """local_map[TestLocalMap.test_infer_rejected_at_leaves.<locals>.infer_bare_out]: output_types contains Infer at a leaf; only the bare value of in_types may be Infer.""",
+            )
+
+    def test_structure_mismatch(self):
+        """``in_types`` whose pytree structure differs from args raises ``SpmdTypeError``."""
+        with typecheck():
+            x = self._generate_inputs((4, 3), self.pg, R)
+
+            @local_map(
+                in_types=({self.pg: R}, {self.pg: R}),  # 2 specs for 1 arg
+                out_types={self.pg: R},
+            )
+            def fn(x):
+                return x.clone()
+
+            with self.assertRaisesRegex(
+                SpmdTypeError,
+                r"input_types pytree structure does not match input",
+            ):
+                fn(x)
+
+    def test_input_validation(self):
+        """Boundary checks reject mismatches: local type, PartitionSpec, tensor/None alignment."""
+        with typecheck():
+            x = self._generate_inputs((4, 3), self.pg, R)
+
+            # Local type mismatch (R vs declared V).
+            @local_map(in_types=({self.pg: V},), out_types={self.pg: V})
+            def bad_local_type(x):
+                return x.clone()
+
+            with self.assertRaises(SpmdTypeError):
+                bad_local_type(x)
+
+            # Tensor input with ``None`` spec.
+            @local_map(in_types=(None,), out_types={self.pg: R})
+            def tensor_with_none(x):
+                return x.clone()
+
+            with self.assertRaises(SpmdTypeError):
+                tensor_with_none(x)
+
+            # PartitionSpec mismatch.
+            x_sharded = self.rank_map(lambda r: torch.randn(4, 3))
+            assert_type(x_sharded, {self.pg: S(0)})  # PartitionSpec(self.pg, None)
+
+            @local_map(
+                in_types=(({self.pg: V}, PartitionSpec(None, self.pg)),),
+                out_types={self.pg: V},
+            )
+            def bad_pspec(x):
+                return x.clone()
+
+            with self.assertRaises(SpmdTypeError):
+                bad_pspec(x_sharded)
 
 
 if __name__ == "__main__":
