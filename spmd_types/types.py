@@ -119,10 +119,10 @@ Partial = P
 # Type aliases
 PerMeshAxisSpmdType = PerMeshAxisLocalSpmdType | Shard
 
-# Axis identifier: a MeshAxis or a ProcessGroup.
-# ProcessGroup is accepted for convenience but is normalized to MeshAxis
-# internally via normalize_axis().
-DeviceMeshAxis: TypeAlias = "MeshAxis | ProcessGroup"
+# Axis identifier: a MeshAxis, ProcessGroup, or str.
+# ProcessGroup is converted to MeshAxis via MeshAxis.of().
+# str is resolved by name against the current mesh (set via set_current_mesh).
+DeviceMeshAxis: TypeAlias = "MeshAxis | ProcessGroup | str"
 
 # PerMeshAxisSpmdTypes is the permissive input variant that also accepts S(i).
 # Used in user-facing APIs like assert_type, where S(i) is syntax sugar
@@ -369,14 +369,37 @@ def _canonicalize_shard(typ: PerMeshAxisSpmdType, ndim: int) -> PerMeshAxisSpmdT
 def normalize_axis(axis: DeviceMeshAxis) -> MeshAxis:
     """Normalize a DeviceMeshAxis to its canonical form (MeshAxis).
 
-    ProcessGroup is converted to MeshAxis via MeshAxis.of().
-    MeshAxis passes through unchanged.
+    MeshAxis passes through unchanged. ProcessGroup is converted via
+    MeshAxis.of(). str is resolved by name against the current mesh.
 
     Args:
-        axis: The mesh axis identifier (MeshAxis or ProcessGroup).
+        axis: The mesh axis identifier (MeshAxis, ProcessGroup, or str).
     """
     if isinstance(axis, MeshAxis):
         return axis
+    if isinstance(axis, str):
+        from spmd_types._state import _find_name_in_stack, current_mesh_names
+
+        names = current_mesh_names()
+        if names is None:
+            raise SpmdTypeError(
+                f"Cannot resolve axis name {axis!r}: no current mesh is set. "
+                f"Use set_current_mesh() or pass a MeshAxis object instead."
+            )
+        if axis not in names:
+            available = ", ".join(sorted(names.keys())) or "(no named axes)"
+            msg = (
+                f"No mesh axis named {axis!r} in the current mesh. "
+                f"Available: {available}"
+            )
+            if _find_name_in_stack(axis):
+                msg += (
+                    f". Note: {axis!r} exists in an outer mesh on the stack "
+                    f"-- did you mean to use it outside the current "
+                    f"set_current_mesh() context?"
+                )
+            raise SpmdTypeError(msg)
+        return names[axis]
     # ProcessGroup -> MeshAxis
     return MeshAxis.of(axis)
 
@@ -490,12 +513,15 @@ def format_axis(axis: DeviceMeshAxis) -> str:
     """Format a mesh axis for display in error messages.
 
     For MeshAxis, uses the MeshAxis repr (e.g., ``tp``).
+    For str, shows the quoted name (e.g., ``'TP'``).
     For ProcessGroup axes, converts to MeshAxis first.
 
     Args:
-        axis: The mesh axis identifier (MeshAxis or ProcessGroup).
+        axis: The mesh axis identifier (MeshAxis, ProcessGroup, or str).
     """
     if isinstance(axis, MeshAxis):
+        return repr(axis)
+    if isinstance(axis, str):
         return repr(axis)
     # ProcessGroup - convert to MeshAxis for display
     return repr(normalize_axis(axis))

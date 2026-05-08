@@ -232,7 +232,7 @@ def reinterpret_mesh(
     if isinstance(type, dict):
         dst = _validate(type)
     else:
-        dst = _resolve_axes(type)
+        dst, _names = _resolve_axes(type)
 
     src_type = get_local_type(tensor)
     src_spec = get_partition_spec(tensor)

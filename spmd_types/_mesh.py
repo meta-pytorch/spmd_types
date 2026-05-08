@@ -22,19 +22,26 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def set_current_mesh(axes: frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup]):
+def set_current_mesh(
+    axes: (
+        frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup] | dict[str, MeshAxis]
+    ),
+):
     """Context manager that pushes a mesh onto the stack.
 
     Args:
         axes: The mesh to set. Accepts:
-            - A frozenset of orthogonal MeshAxis objects.
-            - A DeviceMesh whose named dimensions are converted to MeshAxis.
-            - A sequence of ProcessGroup objects, each converted via MeshAxis.of().
+            - A ``dict[str, MeshAxis]`` mapping names to axes (preferred).
+            - A ``DeviceMesh`` whose named dimensions are converted to MeshAxis
+              (names are taken from ``mesh_dim_names``).
+            - A frozenset of orthogonal MeshAxis objects (no string lookup).
+            - A sequence of ProcessGroup objects, each converted via
+              ``MeshAxis.of()`` (no string lookup).
 
     Singleton (size-1) axes are dropped in all cases via ``normalize_mesh``.
     """
-    resolved = _resolve_axes(axes)
-    _push_mesh(resolved)
+    resolved, names = _resolve_axes(axes)
+    _push_mesh(resolved, names)
     try:
         yield
     finally:
@@ -42,26 +49,36 @@ def set_current_mesh(axes: frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGr
 
 
 def _resolve_axes(
-    axes: frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup],
-) -> frozenset[MeshAxis]:
-    """Normalize the various input forms to a frozenset of MeshAxis.
+    axes: (
+        frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup] | dict[str, MeshAxis]
+    ),
+) -> tuple[frozenset[MeshAxis], dict[str, MeshAxis]]:
+    """Normalize the various input forms to a frozenset of MeshAxis and a name mapping.
 
-    Converts the input to a raw frozenset of MeshAxis, then passes it
-    through ``normalize_mesh`` which drops size-1 axes and checks
-    orthogonality.
+    Returns:
+        A tuple of (frozenset of normalized axes, name-to-axis dict).
+        The name dict is empty for frozenset and Sequence[ProcessGroup] inputs.
     """
-    if isinstance(axes, frozenset):
+    if isinstance(axes, dict):
+        raw = frozenset(axes.values())
+        names = axes
+    elif isinstance(axes, frozenset):
         raw = axes
+        names = {}
     elif isinstance(axes, DeviceMesh):
-        raw = _device_mesh_to_axes(axes)
+        raw, names = _device_mesh_to_axes(axes)
     else:
-        # Sequence of ProcessGroup
         raw = frozenset(MeshAxis.of(pg) for pg in axes)
-    return normalize_mesh(raw)
+        names = {}
+    normalized = normalize_mesh(raw)
+    filtered_names = {k: v for k, v in names.items() if v in normalized}
+    return normalized, filtered_names
 
 
-def _device_mesh_to_axes(mesh: DeviceMesh) -> frozenset[MeshAxis]:
-    """Convert a DeviceMesh to a frozenset of MeshAxis objects.
+def _device_mesh_to_axes(
+    mesh: DeviceMesh,
+) -> tuple[frozenset[MeshAxis], dict[str, MeshAxis]]:
+    """Convert a DeviceMesh to a frozenset of MeshAxis objects and a name mapping.
 
     Each named dimension of the mesh becomes a MeshAxis via
     ``MeshAxis.of(mesh.get_group(name))``.  Singleton filtering is handled
@@ -73,4 +90,5 @@ def _device_mesh_to_axes(mesh: DeviceMesh) -> frozenset[MeshAxis]:
             "set_current_mesh. Use init_device_mesh(..., mesh_dim_names=...) "
             "or pass a frozenset of MeshAxis objects instead."
         )
-    return frozenset(MeshAxis.of(mesh.get_group(name)) for name in mesh.mesh_dim_names)
+    names = {name: MeshAxis.of(mesh.get_group(name)) for name in mesh.mesh_dim_names}
+    return frozenset(names.values()), names

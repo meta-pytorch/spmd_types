@@ -18,10 +18,20 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from spmd_types._mesh_axis import MeshAxis
+    from torch.distributed import ProcessGroup
+    from torch.distributed.device_mesh import DeviceMesh
+
+
+class MeshEntry(NamedTuple):
+    axes: frozenset[MeshAxis]
+    names: dict[str, MeshAxis]
+
 
 _tls = threading.local()
 
@@ -67,21 +77,47 @@ def current_mesh() -> frozenset[MeshAxis] | None:
     """Return the current mesh axes, or None if no mesh is set."""
     stack = getattr(_tls, "mesh_stack", None)
     if stack:
-        return stack[-1]
+        return stack[-1].axes
     return None
 
 
-def _push_mesh(mesh: frozenset[MeshAxis]) -> None:
-    assert all(ax.size() > 1 for ax in mesh), (
-        f"mesh must not contain size-1 axes, got {mesh}"
+def current_mesh_names() -> dict[str, MeshAxis] | None:
+    """Return the name-to-axis mapping for the current mesh, or None."""
+    stack = getattr(_tls, "mesh_stack", None)
+    if stack:
+        return stack[-1].names
+    return None
+
+
+def _push_mesh(
+    mesh: frozenset[MeshAxis]
+    | DeviceMesh
+    | Sequence[ProcessGroup]
+    | dict[str, MeshAxis],
+    names: dict[str, MeshAxis] | None = None,
+) -> None:
+    if isinstance(mesh, frozenset):
+        resolved, resolved_names = mesh, names if names is not None else {}
+    else:
+        from spmd_types._mesh import _resolve_axes
+
+        resolved, resolved_names = _resolve_axes(mesh)
+    assert all(ax.size() > 1 for ax in resolved), (
+        f"mesh must not contain size-1 axes, got {resolved}"
     )
     if not hasattr(_tls, "mesh_stack"):
         _tls.mesh_stack = []
-    _tls.mesh_stack.append(mesh)
+    _tls.mesh_stack.append(MeshEntry(resolved, resolved_names))
 
 
-def _pop_mesh() -> frozenset[MeshAxis]:
+def _pop_mesh() -> MeshEntry:
     return _tls.mesh_stack.pop()
+
+
+def _find_name_in_stack(name: str) -> bool:
+    """Check whether *name* exists in any entry on the mesh stack (not just the top)."""
+    stack: list[MeshEntry] = getattr(_tls, "mesh_stack", [])
+    return any(name in entry.names for entry in stack)
 
 
 def _clear_mesh_stack() -> None:

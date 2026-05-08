@@ -590,6 +590,89 @@ class TestAssertTypeBareExpansion(LocalTensorTestCase):
             assert_type(x, R)
 
 
+class TestStringAxisLookup(LocalTensorTestCase, expecttest.TestCase):
+    """Test string-based mesh axis lookup in assert_type and normalize_axis."""
+
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+
+    def test_string_axis_in_assert_type(self):
+        """assert_type with string keys resolves against current mesh names."""
+        x = torch.randn(4)
+        with set_current_mesh(self.mesh):
+            assert_type(x, {"tp": R, "dp": V})
+        tp = self.mesh.get_group("tp")
+        dp = self.mesh.get_group("dp")
+        self.assertIs(get_axis_local_type(x, tp), R)
+        self.assertIs(get_axis_local_type(x, dp), V)
+
+    def test_string_axis_in_dict_input(self):
+        """set_current_mesh with dict[str, MeshAxis] enables string lookup."""
+        tp_axis = MeshAxis.of(self.mesh.get_group("tp"))
+        dp_axis = MeshAxis.of(self.mesh.get_group("dp"))
+        x = torch.randn(4)
+        with set_current_mesh({"TP": tp_axis, "DP": dp_axis}):
+            assert_type(x, {"TP": R, "DP": V})
+        self.assertIs(get_axis_local_type(x, tp_axis), R)
+        self.assertIs(get_axis_local_type(x, dp_axis), V)
+
+    def test_string_axis_no_mesh_raises(self):
+        """normalize_axis with string raises when no mesh is set."""
+        with self.assertRaises(SpmdTypeError) as cm:
+            normalize_axis("TP")
+        self.assertExpectedInline(
+            str(cm.exception),
+            """Cannot resolve axis name 'TP': no current mesh is set. Use set_current_mesh() or pass a MeshAxis object instead.""",
+        )
+
+    def test_string_axis_not_found_raises(self):
+        """normalize_axis with unknown name raises with available names."""
+        with set_current_mesh(self.mesh):
+            with self.assertRaises(SpmdTypeError) as cm:
+                normalize_axis("XP")
+            self.assertExpectedInline(
+                str(cm.exception),
+                """No mesh axis named 'XP' in the current mesh. Available: dp, tp""",
+            )
+
+    def test_string_axis_not_found_but_on_stack_raises(self):
+        """normalize_axis hints when name exists on outer stack entry."""
+        tp_axis = MeshAxis.of(self.mesh.get_group("tp"))
+        dp_axis = MeshAxis.of(self.mesh.get_group("dp"))
+        with set_current_mesh({"TP": tp_axis, "DP": dp_axis}):
+            with set_current_mesh({"inner": tp_axis}):
+                with self.assertRaises(SpmdTypeError) as cm:
+                    normalize_axis("TP")
+                self.assertExpectedInline(
+                    str(cm.exception),
+                    """No mesh axis named 'TP' in the current mesh. Available: inner. Note: 'TP' exists in an outer mesh on the stack -- did you mean to use it outside the current set_current_mesh() context?""",
+                )
+
+    def test_device_mesh_populates_names(self):
+        """DeviceMesh input to set_current_mesh auto-populates name mapping."""
+        from spmd_types import current_mesh_names
+
+        with set_current_mesh(self.mesh):
+            names = current_mesh_names()
+            self.assertIsNotNone(names)
+            self.assertIn("dp", names)
+            self.assertIn("tp", names)
+
+    def test_frozenset_has_empty_names(self):
+        """frozenset input to set_current_mesh gives empty name mapping."""
+        from spmd_types import current_mesh_names
+
+        tp_axis = MeshAxis.of(self.mesh.get_group("tp"))
+        dp_axis = MeshAxis.of(self.mesh.get_group("dp"))
+        with set_current_mesh(frozenset({tp_axis, dp_axis})):
+            names = current_mesh_names()
+            self.assertEqual(names, {})
+
+
 class TestTypeErrorMessages(LocalTensorTestCase, expecttest.TestCase):
     """Test that type errors include actionable fix suggestions.
 

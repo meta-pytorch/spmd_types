@@ -38,6 +38,7 @@ from spmd_types._reinterpret_mesh import reinterpret_mesh  # noqa: F401
 from spmd_types._scalar import Scalar  # noqa: F401
 from spmd_types._state import (  # noqa: F401
     current_mesh,
+    current_mesh_names,
     is_type_checking,
     no_typecheck,
 )
