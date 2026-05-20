@@ -15,6 +15,7 @@ import unittest
 from spmd_types import (
     I,
     Invariant,
+    normalize_partition_spec,
     P,
     Partial,
     PartitionSpec,
@@ -22,11 +23,13 @@ from spmd_types import (
     R,
     Replicate,
     S,
+    set_current_mesh,
     V,
     Varying,
 )
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types.types import (
+    partition_spec_get_shard,
     partition_spec_to_shard_types,
     shard_types_to_partition_spec,
     SpmdTypeError,
@@ -37,6 +40,7 @@ from spmd_types.types import (
 tp = MeshAxis.of(4, stride=1)  # ranks {0,1,2,3}
 dp = MeshAxis.of(4, stride=4)  # ranks {0,4,8,12}
 ep = MeshAxis.of(4, stride=16)  # ranks {0,16,32,48}
+cp = MeshAxis.of(1, stride=64)  # singleton axis
 
 
 class TestTypeEnum(unittest.TestCase):
@@ -227,6 +231,32 @@ class TestPartitionSpecToShardTypes(unittest.TestCase):
         shards = partition_spec_to_shard_types(spec)
         rebuilt = shard_types_to_partition_spec(shards, 2)
         self.assertEqual(rebuilt, spec)
+
+    def test_string_axes_resolve_before_conversion(self):
+        with set_current_mesh({"tp": tp}):
+            shards = partition_spec_to_shard_types(PartitionSpec("tp", None))
+        self.assertEqual(shards, {tp: S(0)})
+
+    def test_get_shard_accepts_unnormalized_spec(self):
+        with set_current_mesh({"tp": tp}):
+            self.assertEqual(partition_spec_get_shard(PartitionSpec("tp"), tp), S(0))
+
+
+class TestNormalizePartitionSpec(unittest.TestCase):
+    """Test explicit PartitionSpec normalization."""
+
+    def test_constructor_preserves_raw_entries(self):
+        spec = PartitionSpec("tp", (), ("dp", "cp"))
+        self.assertEqual(spec, ("tp", (), ("dp", "cp")))
+
+    def test_resolves_names_and_drops_singletons(self):
+        with set_current_mesh({"tp": tp, "cp": cp}):
+            spec = normalize_partition_spec(PartitionSpec(None, ("tp", "cp"), "cp"))
+        self.assertEqual(spec, PartitionSpec(None, tp, None))
+
+    def test_empty_tuple_rejected_by_normalize(self):
+        with self.assertRaises(ValueError):
+            normalize_partition_spec(PartitionSpec(()))
 
 
 if __name__ == "__main__":

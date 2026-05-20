@@ -38,6 +38,7 @@ from spmd_types._reinterpret_mesh import reinterpret_mesh  # noqa: F401
 from spmd_types._scalar import Scalar  # noqa: F401
 from spmd_types._state import (  # noqa: F401
     current_mesh,
+    current_mesh_all_names,
     current_mesh_names,
     is_type_checking,
     no_typecheck,
@@ -71,6 +72,7 @@ from spmd_types.types import (  # noqa: F401
     LocalSpmdType,
     normalize_axis,
     normalize_mesh,
+    normalize_partition_spec,
     P,
     Partial,
     PartitionSpec,

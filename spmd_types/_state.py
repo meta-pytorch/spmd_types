@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 class MeshEntry(NamedTuple):
     axes: frozenset[MeshAxis]
     names: dict[str, MeshAxis]
+    all_names: dict[str, MeshAxis]
 
 
 _tls = threading.local()
@@ -82,10 +83,22 @@ def current_mesh() -> frozenset[MeshAxis] | None:
 
 
 def current_mesh_names() -> dict[str, MeshAxis] | None:
-    """Return the name-to-axis mapping for the current mesh, or None."""
+    """Return the name-to-axis mapping for the current mesh, or None.
+
+    Only includes non-singleton axes, consistent with ``current_mesh()``.
+    Use ``current_mesh_all_names()`` to include singleton axes.
+    """
     stack = getattr(_tls, "mesh_stack", None)
     if stack:
         return stack[-1].names
+    return None
+
+
+def current_mesh_all_names() -> dict[str, MeshAxis] | None:
+    """Return the full name-to-axis mapping including singleton axes, or None."""
+    stack = getattr(_tls, "mesh_stack", None)
+    if stack:
+        return stack[-1].all_names
     return None
 
 
@@ -105,9 +118,11 @@ def _push_mesh(
     assert all(ax.size() > 1 for ax in resolved), (
         f"mesh must not contain size-1 axes, got {resolved}"
     )
+    all_names = resolved_names
+    filtered_names = {k: v for k, v in resolved_names.items() if v in resolved}
     if not hasattr(_tls, "mesh_stack"):
         _tls.mesh_stack = []
-    _tls.mesh_stack.append(MeshEntry(resolved, resolved_names))
+    _tls.mesh_stack.append(MeshEntry(resolved, filtered_names, all_names))
 
 
 def _pop_mesh() -> MeshEntry:
@@ -117,7 +132,7 @@ def _pop_mesh() -> MeshEntry:
 def _find_name_in_stack(name: str) -> bool:
     """Check whether *name* exists in any entry on the mesh stack (not just the top)."""
     stack: list[MeshEntry] = getattr(_tls, "mesh_stack", [])
-    return any(name in entry.names for entry in stack)
+    return any(name in entry.all_names for entry in stack)
 
 
 def _clear_mesh_stack() -> None:

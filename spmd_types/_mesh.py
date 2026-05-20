@@ -38,7 +38,9 @@ def set_current_mesh(
             - A sequence of ProcessGroup objects, each converted via
               ``MeshAxis.of()`` (no string lookup).
 
-    Singleton (size-1) axes are dropped in all cases via ``normalize_mesh``.
+    Singleton (size-1) axes are dropped from the active axis set via
+    ``normalize_mesh`` but remain in the name lookup table
+    (``current_mesh_all_names``).
     """
     resolved, names = _resolve_axes(axes)
     _push_mesh(resolved, names)
@@ -71,8 +73,7 @@ def _resolve_axes(
         raw = frozenset(MeshAxis.of(pg) for pg in axes)
         names = {}
     normalized = normalize_mesh(raw)
-    filtered_names = {k: v for k, v in names.items() if v in normalized}
-    return normalized, filtered_names
+    return normalized, names
 
 
 def _device_mesh_to_axes(

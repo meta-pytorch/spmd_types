@@ -133,10 +133,11 @@ PerMeshAxisSpmdTypes: TypeAlias = "dict[DeviceMeshAxis, PerMeshAxisSpmdType]"
 # This is the type stored on tensors; Shard is never stored.
 LocalSpmdType: TypeAlias = "dict[DeviceMeshAxis, PerMeshAxisLocalSpmdType]"
 
-# Element type for PartitionSpec entries after normalization.
-# Each entry is None (replicated), a single MeshAxis, or a tuple of MeshAxis
-# (multi-axis sharding on one dim).
-PartitionSpecEntry: TypeAlias = "MeshAxis | tuple[MeshAxis, ...] | None"
+# Element type for PartitionSpec entries. Each entry is None (replicated), a
+# single mesh axis, or a tuple of mesh axes (multi-axis sharding on one dim).
+# PartitionSpec stores entries exactly as written; runtime APIs normalize and
+# resolve string names at their boundaries.
+PartitionSpecEntry: TypeAlias = "DeviceMeshAxis | tuple[DeviceMeshAxis, ...] | None"
 
 # =============================================================================
 # PartitionSpec for Global SPMD
@@ -158,20 +159,7 @@ class PartitionSpec(tuple[PartitionSpecEntry, ...]):
         cls,
         *args: DeviceMeshAxis | tuple[DeviceMeshAxis, ...] | None,
     ):
-        normalized: list[MeshAxis | tuple[MeshAxis, ...] | None] = []
-        for i, entry in enumerate(args):
-            if entry is None:
-                normalized.append(None)
-            elif isinstance(entry, tuple):
-                if len(entry) == 0:
-                    raise ValueError(
-                        f"PartitionSpec entry at dim {i} is an empty tuple. "
-                        f"Use None for replicated dimensions."
-                    )
-                normalized.append(tuple(normalize_axis(a) for a in entry))
-            else:
-                normalized.append(normalize_axis(entry))
-        return super().__new__(cls, normalized)
+        return super().__new__(cls, args)
 
     def __repr__(self):
         if not self:
@@ -189,12 +177,53 @@ class PartitionSpec(tuple[PartitionSpecEntry, ...]):
     def axes_with_partition_spec(self) -> set["MeshAxis"]:
         """Return the set of all mesh axes referenced by this PartitionSpec."""
         result: set[MeshAxis] = set()
-        for entry in self:
+        for entry in normalize_partition_spec(self):
             if entry is None:
                 continue
             for a in entry if isinstance(entry, tuple) else (entry,):
                 result.add(a)
         return result
+
+
+def normalize_partition_spec(spec: PartitionSpec) -> PartitionSpec:
+    """Resolve a PartitionSpec to the canonical internal representation.
+
+    ``PartitionSpec`` itself is intentionally lightweight and stores entries
+    exactly as written, including string axis names.  Runtime and checker
+    internals should call this helper before relying on invariants:
+
+    - all axes are resolved to ``MeshAxis`` objects;
+    - empty tuple entries are rejected;
+    - singleton axes are dropped;
+    - entries containing only singleton axes become ``None``;
+    - remaining axes are mutually orthogonal.
+    """
+    normalized_entries: list[MeshAxis | tuple[MeshAxis, ...] | None] = []
+    all_axes: list[MeshAxis] = []
+    for i, entry in enumerate(spec):
+        if entry is None:
+            normalized_entries.append(None)
+            continue
+        axes = entry if isinstance(entry, tuple) else (entry,)
+        if len(axes) == 0:
+            raise ValueError(
+                f"PartitionSpec entry at dim {i} is an empty tuple. "
+                f"Use None for replicated dimensions."
+            )
+        normalized_axes = tuple(
+            normalized_axis
+            for normalized_axis in (normalize_axis(axis) for axis in axes)
+            if normalized_axis.size() > 1
+        )
+        all_axes.extend(normalized_axes)
+        if not normalized_axes:
+            normalized_entries.append(None)
+        elif len(normalized_axes) == 1:
+            normalized_entries.append(normalized_axes[0])
+        else:
+            normalized_entries.append(normalized_axes)
+    _check_orthogonality(all_axes)
+    return PartitionSpec(*normalized_entries)
 
 
 # =============================================================================
@@ -378,9 +407,9 @@ def normalize_axis(axis: DeviceMeshAxis) -> MeshAxis:
     if isinstance(axis, MeshAxis):
         return axis
     if isinstance(axis, str):
-        from spmd_types._state import _find_name_in_stack, current_mesh_names
+        from spmd_types._state import _find_name_in_stack, current_mesh_all_names
 
-        names = current_mesh_names()
+        names = current_mesh_all_names()
         if names is None:
             raise SpmdTypeError(
                 f"Cannot resolve axis name {axis!r}: no current mesh is set. "
@@ -604,8 +633,9 @@ def partition_spec_to_shard_types(
     Raises:
         SpmdTypeError: If an axis appears at two different dims.
     """
+    normalized_spec = normalize_partition_spec(spec)
     result: dict[MeshAxis, Shard] = {}
-    for dim, entry in enumerate(spec):
+    for dim, entry in enumerate(normalized_spec):
         if entry is None:
             continue
         axes = entry if isinstance(entry, tuple) else (entry,)
@@ -621,7 +651,7 @@ def partition_spec_to_shard_types(
 
 def partition_spec_get_shard(
     spec: PartitionSpec | None,
-    axis: MeshAxis,
+    axis: DeviceMeshAxis,
 ) -> Shard | None:
     """Return the Shard type for ``axis`` in ``spec``, or None if not sharded.
 
@@ -635,10 +665,12 @@ def partition_spec_get_shard(
     """
     if spec is None:
         return None
-    for dim, entry in enumerate(spec):
+    normalized_axis = normalize_axis(axis)
+    normalized_spec = normalize_partition_spec(spec)
+    for dim, entry in enumerate(normalized_spec):
         if entry is None:
             continue
         axes = entry if isinstance(entry, tuple) else (entry,)
-        if axis in axes:
+        if normalized_axis in axes:
             return Shard(dim)
     return None

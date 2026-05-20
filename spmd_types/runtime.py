@@ -49,6 +49,7 @@ from spmd_types.types import (
     LocalSpmdType,
     normalize_axis,
     normalize_local_type,
+    normalize_partition_spec,
     P,
     PartitionSpec,
     PerMeshAxisLocalSpmdType,
@@ -388,6 +389,7 @@ def assert_type(  # noqa: C901
 
     ############ Validate partition_spec length ############
     if partition_spec is not None:
+        partition_spec = normalize_partition_spec(partition_spec)
         if len(partition_spec) != tensor.ndim:
             raise SpmdTypeError(
                 f"PartitionSpec length {len(partition_spec)} doesn't match "

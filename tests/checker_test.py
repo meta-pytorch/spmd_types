@@ -907,6 +907,18 @@ class TestAssertTypeShardSugar(LocalTensorTestCase):
         assert_type(x, {}, PartitionSpec(None, self.tp))
         self.assertIs(get_axis_local_type(x, self.tp), V)
 
+    def test_partition_spec_ignores_singleton_named_axes(self):
+        """Size-1 named axes in PartitionSpec collapse at runtime boundaries."""
+        mesh = init_device_mesh("cpu", (2, 1, 3), mesh_dim_names=("dp", "cp", "tp"))
+
+        with set_current_mesh(mesh):
+            x = torch.randn(3, 4)
+            assert_type(x, {"cp": R}, PartitionSpec(None, ("tp", "cp")))
+            self.assertEqual(
+                get_partition_spec(x), PartitionSpec(None, normalize_axis("tp"))
+            )
+            self.assertNotIn(normalize_axis("cp"), get_local_type(x))
+
     def test_partition_spec_wrong_length_rejected(self):
         """PartitionSpec length must match tensor ndim."""
         x = torch.randn(3, 4)
@@ -2165,7 +2177,7 @@ class TestRegisterDecompositionGlobalSpmd(LocalTensorTestCase):
         y = self.rmsnorm_like(x, w, 1e-6)
         self.assertEqual(
             get_partition_spec(y),
-            PartitionSpec(self.pg, None),
+            PartitionSpec(normalize_axis(self.pg), None),
         )
 
     def test_shard_on_normalized_dim_rejected(self):
@@ -3079,7 +3091,10 @@ Source group {mesh_tp} and destination group {mesh_ep} flatten to different rank
                 x, {self.dp: V, self.cp: V}, PartitionSpec((self.dp, self.cp), None)
             )
             y = reinterpret_mesh(x, {self.dp_cp: V})
-            self.assertEqual(get_partition_spec(y), PartitionSpec(self.dp_cp, None))
+            self.assertEqual(
+                get_partition_spec(y),
+                PartitionSpec(normalize_axis(self.dp_cp), None),
+            )
 
     def test_reinterpret_mesh_axes_only_flatten_unflatten(self) -> None:
         """axes-only reinterpret_mesh: dp,cp -> dp_cp derives types from source."""
@@ -3289,7 +3304,10 @@ class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
 
             y = fn(x, w)
             self.assertIs(get_axis_local_type(y, self.pg), V)
-            self.assertEqual(get_partition_spec(y), PartitionSpec(None, self.pg))
+            self.assertEqual(
+                get_partition_spec(y),
+                PartitionSpec(None, normalize_axis(self.pg)),
+            )
 
     def test_pytree_flatten(self):
         """``in_types`` / ``out_types`` mirror the structure of args / return."""
@@ -3308,7 +3326,10 @@ class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
             a, b = fn(x, [w1, w2])
             for t in (a, b):
                 self.assertIs(get_axis_local_type(t, self.pg), V)
-                self.assertEqual(get_partition_spec(t), PartitionSpec(self.pg, None))
+                self.assertEqual(
+                    get_partition_spec(t),
+                    PartitionSpec(normalize_axis(self.pg), None),
+                )
 
     def test_explicit_partition_spec_and_non_tensor(self):
         """Tuple spec carries an explicit ``PartitionSpec``; ``None`` skips a non-tensor arg."""
@@ -3327,7 +3348,10 @@ class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
 
             y = fn(x, 2.0)
             self.assertIs(get_axis_local_type(y, self.pg), V)
-            self.assertEqual(get_partition_spec(y), PartitionSpec(None, None, self.pg))
+            self.assertEqual(
+                get_partition_spec(y),
+                PartitionSpec(None, None, normalize_axis(self.pg)),
+            )
 
     def test_bare_partition_spec_leaf(self):
         """Bare ``PartitionSpec`` leaf -- local type V is inferred from the spec."""
@@ -3345,7 +3369,32 @@ class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
             y = fn(x, 2.0)
             # Output stamp: V on self.pg with the declared PartitionSpec.
             self.assertIs(get_axis_local_type(y, self.pg), V)
-            self.assertEqual(get_partition_spec(y), PartitionSpec(None, None, self.pg))
+            self.assertEqual(
+                get_partition_spec(y),
+                PartitionSpec(None, None, normalize_axis(self.pg)),
+            )
+
+    def test_partition_spec_string_axes_resolve_at_boundary(self):
+        """Decorator-time string axes resolve when local_map checks boundaries."""
+
+        @local_map(
+            in_types=(PartitionSpec("tp", None), None),
+            out_types=PartitionSpec(None, None, "tp"),
+        )
+        def fn(x, scale):
+            return (x * scale).unsqueeze(0).transpose(1, 2)
+
+        with set_current_mesh(self.mesh):
+            x = self.rank_map(lambda r: torch.randn(4, 3))
+            with typecheck():
+                assert_type(x, {"tp": S(0)})
+
+                y = fn(x, 2.0)
+                self.assertIs(get_axis_local_type(y, self.pg), V)
+                self.assertEqual(
+                    get_partition_spec(y),
+                    PartitionSpec(None, None, normalize_axis("tp")),
+                )
 
     def test_infer_input_default(self):
         """``in_types`` defaults to bare ``Infer`` broadcast: no input checks.
