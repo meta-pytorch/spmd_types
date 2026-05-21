@@ -34,7 +34,7 @@ import torch
 from spmd_types._frame import _get_user_frame
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
-from spmd_types._state import current_mesh, is_type_checking, no_typecheck
+from spmd_types._state import current_mesh, is_type_checking
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import (
     _LOCAL_TYPE_ATTR,
@@ -885,11 +885,11 @@ def local_map(  # noqa: C901
     in_types: Any = Infer,
     out_types: Any,
 ):
-    """Decorator that wraps a function whose body the SPMD type checker
-    can't reason about -- data-dependent ops (e.g. ``searchsorted``), custom
+    """Decorator that wraps a function whose body should run under local SPMD
+    type checking -- data-dependent ops (e.g. ``searchsorted``), custom
     kernels, manual shard manipulations (e.g. ring attention). Inside ``fn``,
-    type checking is suspended; ``local_map`` re-establishes SPMD types at the
-    boundary:
+    type checking switches to local mode (R/I/V/P only, no global shard
+    propagation); ``local_map`` re-establishes SPMD types at the boundary:
 
     * On **entry**, each input is checked against ``in_types``.  The tensor's
       existing SPMD type must be consistent with what's declared
@@ -899,9 +899,9 @@ def local_map(  # noqa: C901
       annotated.
 
     * On **return**, each output is assigned the SPMD type declared by
-      ``out_types``.  The body produces tensors with no SPMD types of their own
-      (because type checking was suspended), so this is what makes them usable
-      in the surrounding typed code.
+      ``out_types``.  The body may have produced local SPMD types, but the
+      boundary assertion stamps the declared global types, making the outputs
+      usable in the surrounding globally-typed code.
 
     Forward-only: gradient types are not part of the contract.  Inspired by
     ``torch.distributed.local_map``.
@@ -1044,14 +1044,14 @@ def local_map(  # noqa: C901
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            # Fast path: with no active typecheck (or inside ``no_typecheck``).
+            # Fast path: no active typecheck session.
             if not is_type_checking():
                 return fn(*args, **kwargs)
 
             # Boundary input checks run in the caller's typecheck environment
             # (whatever mode is active when the wrapped fn is called), so
             # ``assert_type`` sees the same global/local SPMD context as the
-            # caller -- only the body below is scoped under ``no_typecheck()``.
+            # caller -- the body below runs under ``local()``.
             #
             # Bare ``in_types=Infer`` short-circuits the entire input pass;
             # any ``Infer`` reaching ``_walk_boundary`` is a leaf-level misuse
@@ -1059,7 +1059,7 @@ def local_map(  # noqa: C901
             if in_types is not Infer:
                 _walk_boundary(args, in_types, "input")
 
-            with no_typecheck():
+            with local():
                 result = fn(*args, **kwargs)
 
             _walk_boundary(result, out_types, "output")

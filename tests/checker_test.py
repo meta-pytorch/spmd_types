@@ -3327,14 +3327,15 @@ class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
     """Tests for ``local_map``."""
 
     def test_basic(self):
-        """Validates inputs, runs body opaquely, stamps outputs (local type + PartitionSpec)."""
+        """Validates inputs, runs body in local mode, stamps outputs (local type + PartitionSpec)."""
         with typecheck():
             x = self._generate_inputs((4, 3), self.pg, S(0))
             w = self._generate_inputs((3, 5), self.pg, R)
 
             @local_map(
                 in_types=({self.pg: S(0)}, {self.pg: R}),
-                # Wrong on purpose: shows no spmd type propagates inside fn.
+                # Wrong global spec on purpose: local mode can't catch the
+                # S(0) vs S(1) dimension mismatch since it only tracks R/I/V/P.
                 out_types={self.pg: S(1)},
             )
             def fn(x, w):
