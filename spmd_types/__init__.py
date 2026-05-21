@@ -56,6 +56,7 @@ from spmd_types.runtime import (  # noqa: F401
     assert_type,
     assert_type_like,
     Infer,
+    local,
     local_map,
     mutate_type,
     register_autograd_function,

@@ -17,7 +17,7 @@ import unittest
 import expecttest
 import torch
 import torch.distributed as dist
-from spmd_types import I, Infer, local_map, P, R, S, Scalar, set_current_mesh, V
+from spmd_types import I, Infer, local, local_map, P, R, S, Scalar, set_current_mesh, V
 from spmd_types._checker import (
     _trace_logger,
     _validate_partition_spec_for_global_spmd,
@@ -3283,6 +3283,44 @@ class TestScalarWithPartitionSpec(SpmdTypeCheckedTestCase):
         assert_type(x, {self.pg: S(1)})
         result = torch.narrow(x, 1, Scalar(0, {self.pg: V}), Scalar(4, {self.pg: V}))
         self.assertIs(get_axis_local_type(result, self.pg), V)
+
+
+class TestLocal(SpmdTypeCheckedTestCase):
+    """Tests for the ``local()`` context manager."""
+
+    def test_noop_outside_typecheck(self):
+        """``local()`` is a no-op when no typecheck session is active."""
+        x = torch.randn(4, 3)
+        with local():
+            y = x + x
+        self.assertEqual(y.shape, (4, 3))
+
+    def test_local_mode_propagates_types(self):
+        """Inside ``local()``, local R/I/V/P type checking is active."""
+        x = self._generate_inputs((4, 3), self.pg, R)
+        w = self._generate_inputs((4, 3), self.pg, V)
+        with local():
+            y = x + w
+        self.assertIs(get_axis_local_type(y, self.pg), V)
+
+    def test_local_drops_global_partition_spec_enforcement(self):
+        """``local()`` suppresses global PartitionSpec validation.
+
+        In global mode, V without PartitionSpec raises. Inside ``local()``,
+        V is fine on its own since only R/I/V/P rules apply.
+        """
+        with local():
+            x = torch.randn(4, 3)
+            assert_type(x, {self.pg: V})
+            y = x + x
+            self.assertIs(get_axis_local_type(y, self.pg), V)
+
+    def test_local_inside_global_typecheck(self):
+        """``local()`` can nest inside a global ``typecheck()`` session."""
+        x = self._generate_inputs((4, 3), self.pg, R)
+        with local():
+            y = x * 2.0
+        self.assertIs(get_axis_local_type(y, self.pg), R)
 
 
 class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):

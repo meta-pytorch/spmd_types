@@ -855,6 +855,31 @@ _LocalMapSpecLeaf: TypeAlias = (
 )
 
 
+@contextmanager
+def local():
+    """Mark a region as local-SPMD-only: drops from global to local SPMD
+    types within the block, and is a no-op when type checking is not
+    active.
+
+    Use for blocks that cannot be expressed under global SPMD shard
+    propagation (data-dependent ops, custom kernels, manual sharding) so
+    they continue to type-check under local SPMD without forcing
+    type-checking on in environments that haven't opted in.
+
+    Example::
+
+        with spmd.local():
+            attn_out = attention(q, k, v, ...)
+    """
+    if is_type_checking():
+        from spmd_types._checker import typecheck
+
+        with typecheck(local=True):
+            yield
+    else:
+        yield
+
+
 def local_map(  # noqa: C901
     *,
     in_types: Any = Infer,
