@@ -1266,6 +1266,16 @@ _DETERMINISTIC_FACTORIES: set[Callable] = {
 }
 
 
+# new_zeros/new_ones/new_full create a tensor with a different shape from the
+# input. The output is deterministic and identical on every rank regardless of
+# the input's sharding.
+_DETERMINISTIC_NEW_FACTORIES: set[Callable] = {
+    torch.Tensor.new_zeros,
+    torch.Tensor.new_ones,
+    torch.Tensor.new_full,
+}
+
+
 def _deterministic_factory_type(func: Callable) -> LocalSpmdType:
     """Return Replicate type for deterministic factory ops under a current mesh.
 
@@ -1274,7 +1284,9 @@ def _deterministic_factory_type(func: Callable) -> LocalSpmdType:
     returns {} (typed but unknown on all axes).
     """
     mesh = current_mesh()
-    if mesh is not None and func in _DETERMINISTIC_FACTORIES:
+    if mesh is not None and func in (
+        _DETERMINISTIC_FACTORIES | _DETERMINISTIC_NEW_FACTORIES
+    ):
         return {axis: R for axis in mesh}
     return {}
 
@@ -2874,8 +2886,15 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                 # here (missing axis annotations raise in strict, get skipped in
                 # permissive). Global shard propagation runs after and operates
                 # only on axes present in output_type (filtered below).
-                if not input_types_list:
-                    # No typed tensor inputs and no scalars -- factory op.
+                if func in _DETERMINISTIC_FACTORIES and not input_types_list:
+                    # Deterministic factory with no typed inputs: output is R.
+                    output_type = _deterministic_factory_type(func)
+                elif func in _DETERMINISTIC_NEW_FACTORIES:
+                    # new_zeros/new_ones/new_full: output shape differs from
+                    # input, output is always R (identical values on all ranks).
+                    output_type = _deterministic_factory_type(func)
+                elif not input_types_list:
+                    # No typed tensor inputs and no scalars -- unknown factory.
                     output_type = _deterministic_factory_type(func)
                 elif (decomp_rule := _DECOMP_TYPE_RULES.get(func)) is not None:
                     output_type = decomp_rule(*input_types_list)

@@ -450,6 +450,15 @@ class TestFactoryTensors(LocalTensorTestCase):
         t = torch.tensor(s, dtype=torch.float32)
         self.assertIs(get_axis_local_type(t, self.pg), V)
 
+    def test_new_zeros_from_varying_receiver_is_replicated_under_mesh(self):
+        """``Tensor.new_zeros`` creates deterministic R output, not receiver V."""
+        x = self._generate_inputs((8, 4), self.pg, V)
+
+        with set_current_mesh(self.mesh):
+            loss = x.new_zeros((), dtype=torch.float32)
+
+        self.assertIs(get_axis_local_type(loss, self.pg), R)
+
 
 class TestFactoryTensorsPermissive(LocalTensorTestCase):
     """Test factory tensor behavior in permissive mode.
