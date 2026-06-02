@@ -23,7 +23,11 @@ from collections.abc import Callable
 import torch
 import torch.utils.hooks as _torch_hooks
 from spmd_types._state import is_type_checking
-from spmd_types.runtime import assert_type_like
+from spmd_types.runtime import (
+    _set_partition_spec,
+    assert_type_like,
+    get_partition_spec,
+)
 from spmd_types.types import SpmdTypeError
 from torch.nn.modules._functions import BackwardHookFunction
 
@@ -57,8 +61,12 @@ def _validate(hooks):
 
 
 def _apply_types(hooks, inputs, outputs):
-    if not is_type_checking():
-        return
+    """Copy SPMD annotations across BackwardHookFunction wrappers.
+
+    BackwardHookFunction.apply creates fresh tensor objects for module
+    backward hooks. Registered local hooks are semantically pass-through, so
+    their wrapper tensors should keep the input SPMD metadata.
+    """
     if not isinstance(inputs, tuple):
         inputs = (inputs,)
     if not isinstance(outputs, tuple):
@@ -68,7 +76,10 @@ def _apply_types(hooks, inputs, outputs):
         if fn in _LOCAL_BACKWARD_HOOKS:
             for inp, out in zip(inputs, outputs):
                 if isinstance(inp, torch.Tensor) and isinstance(out, torch.Tensor):
+                    spec = get_partition_spec(inp)
                     assert_type_like(out, inp)
+                    if spec is not None:
+                        _set_partition_spec(out, spec)
 
 
 _orig_setup_input_hook = None
@@ -79,6 +90,7 @@ def _patched_setup_input_hook(self, input):
     _validate(self.user_hooks)
     result = _orig_setup_input_hook(self, input)
     _apply_types(self.user_hooks, input, result)
+    _apply_types(self.user_pre_hooks, input, result)
     return result
 
 
@@ -86,6 +98,7 @@ def _patched_setup_output_hook(self, output):
     _validate(self.user_pre_hooks)
     result = _orig_setup_output_hook(self, output)
     _apply_types(self.user_pre_hooks, output, result)
+    _apply_types(self.user_hooks, output, result)
     return result
 
 
