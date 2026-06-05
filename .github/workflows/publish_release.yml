@@ -1,0 +1,138 @@
+name: Build and publish spmd_types release
+
+# Manually-triggered release pipeline. spmd_types is a pure-Python package, so
+# unlike monarch's publish_release.yml (Rust/CUDA/Docker, many platform wheels)
+# we build a single universal sdist + wheel and publish via PyPI trusted
+# publishing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp into pyproject.toml (e.g. 0.2.0rc1 or 0.2.0). Leave blank to publish the version already in pyproject.toml."
+        required: false
+        default: ""
+      is_prerelease:
+        description: "Is this a pre-release? (Marks the GitHub Release as a pre-release.)"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Stamp release version
+        if: ${{ inputs.version != '' }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          version = os.environ["RELEASE_VERSION"]
+          path = pathlib.Path("pyproject.toml")
+          text, n = re.subn(
+              r'(?m)^version = ".*"$',
+              f'version = "{version}"',
+              path.read_text(),
+              count=1,
+          )
+          assert n == 1, "could not find a version line in pyproject.toml"
+          path.write_text(text)
+          print(f"Stamped version {version}")
+          PY
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+          ls -la dist/
+
+      - name: Resolve built version
+        id: version
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib, tomllib
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          print(f"version={data['project']['version']}")
+          PY
+
+      - name: Smoke-test the wheel
+        run: |
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install dist/*.whl
+          python -c "import spmd_types as m; print('spmd_types', getattr(m, '__version__', 'imported ok'))"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The environment must be configured as the trusted publisher for this
+    # project on PyPI (https://docs.pypi.org/trusted-publishers/).
+    environment: pypi
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+      contents: read
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Display structure of downloaded files
+        run: ls -R dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+
+  release:
+    name: Create GitHub release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create the git tag and GitHub Release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          PRERELEASE: ${{ inputs.is_prerelease }}
+        run: |
+          gh release create "v${VERSION}" dist/* \
+            --title "v${VERSION}" \
+            --generate-notes \
+            $([ "$PRERELEASE" = "true" ] && echo --prerelease)
