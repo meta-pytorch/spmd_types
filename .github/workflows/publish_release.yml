@@ -77,6 +77,7 @@ jobs:
         run: |
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install dist/*.whl
+          cd /tmp
           python -c "import spmd_types as m; print('spmd_types', getattr(m, '__version__', 'imported ok'))"
 
       - name: Upload artifacts
