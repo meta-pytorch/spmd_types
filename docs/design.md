@@ -1,3 +1,5 @@
+# Design
+
 This module defines a type system for distributed training code, based off of
 JAX's sharding in types, but adapted for the PyTorch ecosystem.  It has four
 primary design goals:
@@ -51,7 +53,7 @@ and finally how collectives and special functions interact with the types.
 Then, we will explain how the global SPMD type system adds extra restrictions
 and type refinement on top of the local SPMD type system.
 
-# Local SPMD
+## Local SPMD
 
 What is a local SPMD type?  It describes how a tensor is distributed across
 ranks on an axis of the device mesh, as well as how the gradients of the
@@ -195,7 +197,7 @@ nontrivial type changes must be made explicit via the primitives above.
 TODO: Show local SPMD rules work even when the shapes across ranks are not the
 same.  I think you need to have some special collectives in this case.
 
-## Comms by API
+### Comms by API
 
 Let's describe all of these operators in more detail.
 
@@ -273,7 +275,7 @@ in the docstrings of the corresponding Python functions:
 * `convert` -- see `_local.py::convert`
 * `redistribute` -- see `_collectives.py::redistribute`
 
-## Comms by state transition
+### Comms by state transition
 
 Here is a table comprehensively organizing all of the operators above by state
 transition, omitting operators which are done by composition.  Note that type
@@ -326,7 +328,7 @@ implicitly reinterpreting V as P before reducing.  This avoids a separate
   Almost never wanted in forward (expert_mode gated); exists as the backward of
   `reinterpret(V,P)`.  If you want to shard, use `convert(R,V)` instead.
 
-## Comms by forwards-backwards
+### Comms by forwards-backwards
 
 Here is a table that summarizes the forward-backward relationships between all
 of these operators.  Remember that R in forwards goes to P in backwards, and
@@ -355,7 +357,7 @@ P -> I      all_reduce(I)           I -> R      convert(I,R)
 P -> V      reduce_scatter()        V -> R      all_gather(R)
 ```
 
-## Loss gradient types
+### Loss gradient types
 
 The loss's type on each mesh axis depends on whether the axis partitions
 data or the model.
@@ -414,7 +416,7 @@ So for a typical DP+TP+CP setup: `loss` is `P@dp, I@tp, P@cp`.
 the backward-type rules (R<->P, I<->I, V<->V) then determine gradient types
 throughout the backward pass.
 
-## Expert mode
+### Expert mode
 
 Some `reinterpret` and `convert` operations exist for completeness of the type
 system (and are needed as backward passes for other operations), but are rarely
@@ -474,7 +476,7 @@ Other transitions (R->P via `convert`, I->V via `convert`, V->I via
 `all_gather(I)`, P->I via `all_reduce(I)`, V->P via `reinterpret`) are also
 available without `expert_mode`, but are less commonly needed.
 
-# Global SPMD
+## Global SPMD
 
 What is a global SPMD type?  We take the existing local SPMD type, and augment
 it with a partition spec that says how varying mesh dimensions should be
@@ -568,7 +570,7 @@ einsum() will not automatically work in cases where an operation can be done
 completely locally except for a pending reduction.
 
 
-## Shard propagation
+### Shard propagation
 
 We can think of partition spec as a function which takes a full tensor to a
 mesh of sharded tensors.  The question of shard propagation is, given an input
@@ -640,7 +642,7 @@ then `reinterpret` the result as partial on each of the out partial axes.
 However, this must be done all in one step in global SPMD, since the
 intermediate local operation without reinterprets is not valid in global SPMD.
 
-### Worked example comparing local SPMD and global SPMD
+#### Worked example comparing local SPMD and global SPMD
 
 An illustrative example highlighting the difference between local and global
 SPMD is what happens when we perform the matmul in row-parallel linear
@@ -666,7 +668,7 @@ In global SPMD, we would instead error on the linear call.  Instead, you would w
 out2 = linear(hidden, weight, out_partial_axes=tp)
 ```
 
-### Shard propagation for comms operators
+#### Shard propagation for comms operators
 
 In the API description for comms operators, operators could operate on both
 Varying (non-rank preserving) and Shard (rank preserving) src/dst.  In global
@@ -679,11 +681,11 @@ type is).
 The global SPMD interpretation of convert (when it is defined for global SPMD)
 is straightforward: it is the identity function.
 
-### Per-mesh-dim redistribute
+#### Per-mesh-dim redistribute
 
 See `_collectives.py::redistribute` for the routing table and details.
 
-### Partition spec redistribute
+#### Partition spec redistribute
 
 The above API has two problems:
 
@@ -700,7 +702,7 @@ So we should also support a convenience API `redistribute(src_partition_spec, ds
 which plans the sequence of collectives needed to arrive at the destination partition spec,
 and will flatten collectives together as possible.
 
-### Uneven sharding
+#### Uneven sharding
 
 It is permissible to use global SPMD types to represent sharding situations
 where the sizes of the shards across ranks are uneven.  Sharding simply says
@@ -735,7 +737,7 @@ over a sharded dimension would also require even sharding for correctness (the
 partial means have different denominators), but this is moot for us since we
 don't have partial beyond sum.
 
-## Miscellaneous design notes
+### Miscellaneous design notes
 
 From YZ: in global spmd, can represent partial as an extra dimension, hidden with vmap
 
@@ -746,7 +748,7 @@ From YZ: in global spmd, can represent partial as an extra dimension, hidden wit
 
 Related work: https://arxiv.org/pdf/2506.15961
 
-## Other notes
+### Other notes
 
 Ailing: Why not explicit communication?
 If sharding is part of the type, imagine we have other things in type, like
@@ -756,7 +758,7 @@ dtype promotion in eager, but it's a debatable decision.  Sharding is similar
 to shape/dtype metadata.  Device is a good example, we don't move it
 automatically between devices.
 
-## Unresolved problems
+### Unresolved problems
 
 - What to do about async?
 - What to do about contiguity?
@@ -778,7 +780,7 @@ TODO: worry about runtime cost of setting types inside the function body
 TODO: Need api for all reduce with avg (semantically a sum plus divide, but we
 need the fused version)
 
-## Cross-mesh compatibility
+### Cross-mesh compatibility
 
 Local SPMD types reason about one mesh axis at a time, so a `LocalSpmdType`
 cannot mention overlapping axes simultaneously.  This is why a tensor cannot be
@@ -812,12 +814,16 @@ For example, `(dp: V, cp: V)` may reinterpret as `dp_cp: V`, and
 `(dp: V, cp: R)` may not reinterpret as `dp_cp: V`, because the grouped region
 does not have a uniform local type.
 
-This reinterpretation is never implicit during local SPMD propagation.  Mesh
-mismatch alone does not uniquely determine a target presentation, so automatic
-conversion would be ambiguous.  The user must explicitly request
-`reinterpret_mesh` at the point where a different mesh vocabulary is intended.
+When a current mesh is set (via `set_current_mesh`), operands living on a
+foreign mesh presentation are implicitly reinterpreted onto the current mesh as
+the first stage of type inference (`_auto_reinterpret_cross_mesh`): the checker
+attempts a `reinterpret_mesh` onto the current mesh's axes and errors if the
+two presentations are not compatible.  Outside of a current mesh, mesh mismatch
+alone does not uniquely determine a target presentation, so no automatic
+conversion occurs; the user must explicitly request `reinterpret_mesh` at the
+point where a different mesh vocabulary is intended.
 
-## `torch.no_grad` and types
+### `torch.no_grad` and types
 
 When in a no grad region, no gradients flow.  So we do not need to distinguish
 between Replicate and Invariant in this case.  However, because tensors in a
@@ -829,7 +835,7 @@ when you don't do derivatives, but there is some utility in tracking if a
 tensor is varying, replicated or partial across a mesh axis.  If you find this
 isn't useful, you can also just disable SPMD type checking in this region.
 
-## Mesh stack and `set_current_mesh`
+### Mesh stack and `set_current_mesh`
 
 By default, the type checker infers `all_axes` (the set of mesh axes that all
 operands must be annotated on) from the union of axes across operands.  This
@@ -860,7 +866,7 @@ The mesh stack is thread-local and supports nesting: an inner
 The axes in a `set_current_mesh` call must be mutually orthogonal (no shared
 ranks), enforced at entry.
 
-### Why not DeviceMesh?
+#### Why not DeviceMesh?
 
 The mesh stack works with `MeshAxis` objects rather than PyTorch `DeviceMesh`.
 This allows integrators that don't use `DeviceMesh` (e.g., those with their
@@ -868,7 +874,7 @@ own mesh abstractions) to still benefit from the mesh-completeness check.
 A `MeshAxis` can be constructed from a `DeviceMesh` via
 `MeshAxis.of(mesh.get_group("tp"))` or directly via `MeshAxis.of(size, stride)`.
 
-### Interaction with `assert_type`
+#### Interaction with `assert_type`
 
 `assert_type` does not enforce the current mesh.  It is a pure
 annotation/verification tool: it sets or checks the type on a tensor without
@@ -889,7 +895,7 @@ dp: R}` but fail on an unannotated tensor -- same call, different behavior
 depending on the tensor's history.  Keeping `assert_type` mesh-agnostic
 avoids this.
 
-# Low precision and autograd
+## Low precision and autograd
 
 We would like to address the handling of low precision dtypes and autograd in
 our API design, rather than forcing the user to handle it directly.  Here are

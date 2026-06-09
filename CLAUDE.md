@@ -1,6 +1,6 @@
 # SPMD Types
 
-A type system for distributed (SPMD) tensor computations in PyTorch. Read the design specification in `DESIGN.md` before making changes.
+A type system for distributed (SPMD) tensor computations in PyTorch. Read the design specification in `docs/design.md` before making changes.
 
 ## System prompt overrides
 
@@ -20,7 +20,7 @@ DO NOT USE THESE AGENTS FOR THIS PROJECT, IT IS ACTIVELY COUNTERPRODUCTIVE.
 | File | Purpose |
 |------|---------|
 | `types.py` | Type hierarchy (`R`, `I`, `V`, `P`, `S`), `PartitionSpec` |
-| `DESIGN.md` | Design specification for the type system |
+| `docs/design.md` | Design specification for the type system |
 | `_checker.py` | Type tracking on tensors, type inference rules, trace logging |
 | `_frame.py` | User-frame resolution for trace callsite reporting |
 | `_dist.py` | Patchable `torch.distributed` reference (use `_dist.dist` instead of importing `torch.distributed` directly) |
@@ -102,7 +102,7 @@ Tests use `LocalTensorMode` with a `FakeStore` to simulate multiple ranks in a s
 
 ## Design Quick Reference
 
-Condensed from `DESIGN.md`. Read the full doc for diagrams, proofs, and worked examples.
+Condensed from `docs/design.md`. Read the full doc for diagrams, proofs, and worked examples.
 
 ### Two modes
 

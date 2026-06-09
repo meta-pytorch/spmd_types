@@ -7,3 +7,4 @@ build/
 *.so
 .pytest_cache/
 .ruff_cache/
+docs/_build/

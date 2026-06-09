@@ -349,8 +349,8 @@ def assert_type(  # noqa: C901
     - PartitionSpec ordering matters: (tp, dp) != (dp, tp).
 
     Args:
-        tensor: The tensor to assert or set SPMD type on. type: A dict mapping
-        mesh axes to per-axis SPMD types.
+        tensor: The tensor to assert or set SPMD type on.
+        type: A dict mapping mesh axes to per-axis SPMD types.
             Accepts R, I, V, P, or S(i). S(i) entries are syntax sugar for
             setting V on the axis and storing a PartitionSpec that maps tensor
             dim ``i`` to that mesh axis.
