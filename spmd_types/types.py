@@ -149,10 +149,11 @@ class PartitionSpec(tuple[PartitionSpecEntry, ...]):
     A partition spec describes how tensor dimensions map to mesh axes.
 
     Each element corresponds to a tensor dimension and specifies zero, one, or
-    multiple mesh axes that shard that dimension. For example:
-        - PartitionSpec(tp, None) means dim 0 is sharded on tp, dim 1 is replicated
-        - PartitionSpec((dp, tp), None) means dim 0 is sharded on both dp and tp
-        - PartitionSpec() means fully replicated
+    multiple mesh axes that shard that dimension. For example::
+
+        PartitionSpec(tp, None)       # dim 0 is sharded on tp, dim 1 is replicated
+        PartitionSpec((dp, tp), None) # dim 0 is sharded on both dp and tp
+        PartitionSpec()               # fully replicated
     """
 
     def __new__(
@@ -300,7 +301,7 @@ class _PytreeTuple:
 
 
 class TensorSharding(_PytreeTuple):
-    """A tuple of ``DimSharding``s describing the sharding for a Tensor.
+    """A tuple of ``DimSharding`` objects describing the sharding for a Tensor.
 
     Each element maps one tensor dimension to zero, one, or multiple mesh axis
     names.  For example::
