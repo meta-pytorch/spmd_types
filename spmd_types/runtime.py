@@ -85,6 +85,16 @@ _trace_logger = logging.getLogger(__name__ + ".trace")
 _TRACE = os.environ.get("SPMD_TYPES_TRACE", "") == "1"
 
 
+def _is_tracing() -> bool:
+    """Return True if SPMD type trace logging is currently enabled.
+
+    Other modules must call this instead of importing ``_TRACE`` directly:
+    ``trace()`` rebinds the module global, so a from-import taken at import
+    time would never observe the toggle.
+    """
+    return _TRACE
+
+
 @contextmanager
 def trace(enabled: bool = True):
     """Context manager to enable or disable SPMD type trace logging.

@@ -27,12 +27,11 @@ def _is_internal_frame(filename: str) -> bool:
         if mod is not None and hasattr(mod, "__file__") and mod.__file__:
             if filename.startswith(os.path.dirname(mod.__file__)):
                 return True
-    # Skip spmd_types private modules (_checker.py, _collectives.py, etc.)
-    # but NOT test files or user code that happens to live in the same dir.
+    # Skip spmd_types modules, both private (_checker.py, _collectives.py,
+    # etc.) and public (runtime.py, checker.py): a reported callsite should
+    # never point inside the package itself.
     if filename.startswith(_SPMD_DIR):
-        basename = os.path.basename(filename)
-        if basename.startswith("_"):
-            return True
+        return True
     return False
 
 

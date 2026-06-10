@@ -53,11 +53,11 @@ from spmd_types._state import _current_mode, _set_current_mode, current_mesh
 from spmd_types._traceback import _filter_and_reraise
 from spmd_types._type_attr import get_local_type
 from spmd_types.runtime import (  # noqa: F401
+    _is_tracing,
     _LOCAL_AUTOGRAD_FUNCTIONS,
     _PARTITION_SPEC_ATTR,
     _set_local_type,
     _set_partition_spec,
-    _TRACE,
     _trace_logger,
     _trace_op,
     _TYPECHECK_AUTOGRAD_FUNCTIONS,
@@ -2827,7 +2827,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     )
                     _set_partition_spec(result, new_output_spec)
 
-                if _TRACE:
+                if _is_tracing():
                     _trace_op(
                         func,
                         info.tensor_types,
@@ -2839,7 +2839,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                 # The rule functions validate types internally.
                 RAW_DIST_RULES[func](func, args, kwargs)
 
-                if _TRACE:
+                if _is_tracing():
                     _trace_op(func, info.tensor_types, None)
 
             elif (
@@ -2993,7 +2993,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                                 _set_result_type(out, output_type)
                     _set_result_partition_spec(result, output_specs)
 
-                if _TRACE:
+                if _is_tracing():
                     _trace_op(func, info.tensor_types, output_type)
 
         except SpmdTypeError as e:

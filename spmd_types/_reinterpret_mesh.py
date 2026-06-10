@@ -25,8 +25,8 @@ from spmd_types._state import current_mesh
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import get_local_type, set_local_type as _set_local_type_raw
 from spmd_types.runtime import (
+    _is_tracing,
     _set_partition_spec,
-    _TRACE,
     _trace_op,
     _validate,
     get_partition_spec,
@@ -250,6 +250,6 @@ def reinterpret_mesh(
     _set_local_type_raw(result, new_type)
     if new_spec is not None:
         _set_partition_spec(result, new_spec)
-    if _TRACE:
+    if _is_tracing():
         _trace_op(reinterpret_mesh, [src_type], new_type)
     return result
