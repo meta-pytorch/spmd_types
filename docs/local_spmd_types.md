@@ -191,7 +191,83 @@ invariant (not partial!)
 
 ### Custom autograd functions
 
-TODO: write
+Training codebases typically come with their own differentiable collectives
+(autograd functions whose forward or backward issues communication) as well
+as fused kernels wrapped in `torch.autograd.Function`.  By default, the type
+checker refuses to guess what an unrecognized autograd function does: it
+cannot tell whether the function communicates, so it leaves the outputs
+untyped (and in strict mode, you will get an error as soon as you use those
+outputs together with typed tensors).  To make your existing functions
+typecheckable, there are three registration APIs, in increasing order of
+effort:
+
+**`spmd.register_local_autograd_function`** is for functions that do NOT
+communicate (no collectives anywhere in forward).  The type checker applies
+the standard non-comms propagation rules (see Propagation rules below) to
+infer output types from input types:
+
+```python
+@spmd.register_local_autograd_function
+class FusedSwiGLU(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, w1, w2):
+        ...  # local compute only
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        ...
+```
+
+**`spmd.register_decomposition`** is for fused kernels (e.g., Triton) that
+have a pure-PyTorch reference implementation.  The checker traces the
+reference implementation on meta tensors to infer the output types (each
+primitive op contributing its own typing rule), then stamps those types onto
+the fused kernel's real outputs.  Use this instead of
+`register_local_autograd_function` when the kernel rearranges data in ways
+that interact with sharding (or when you simply already have a reference
+implementation lying around -- it is the most maintainable option):
+
+```python
+@spmd.register_decomposition(_FusedRoPE)
+def native_rope(xq, xk, freqs_cis):
+    ...  # pure PyTorch equivalent; runs on meta tensors, values discarded
+```
+
+**`spmd.register_autograd_function`** is for functions that DO communicate.
+You must supply a `typecheck_forward` staticmethod that declares the typing
+rule: validate the input types with `assert_type`, run the real function,
+then stamp the output types:
+
+```python
+@spmd.register_autograd_function
+class GatherFromParallelRegion(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, pg):
+        ...  # all-gather over pg
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        ...  # split
+
+    @staticmethod
+    def typecheck_forward(x, pg):
+        spmd.assert_type(x, {pg: spmd.S(-1)})
+        out = GatherFromParallelRegion.apply(x, pg)
+        spmd.assert_type(out, {pg: spmd.I})
+        return out
+```
+
+When type checking is active, calls to `.apply()` are rerouted through
+`typecheck_forward`; when it is inactive, `.apply()` runs as normal with
+zero overhead.
+
+Note that for `register_autograd_function`, the type checker trusts your
+`typecheck_forward`: it checks that your *callers* are consistent with the
+declared rule, not that your forward/backward implementations actually match
+it.  The recommended way to gain confidence in the registration itself is to
+port the function's implementation to the `spmd_types` built-in collectives
+(whose typing rules are verified), or to check it against the
+Forwards/Backwards table below.
 
 ### Propagation rules
 
@@ -274,6 +350,138 @@ are multiple mesh axes which are producing pending reductions, e.g.,
 ```python
 spmd.sum(x, (ax1, ax2), src=(spmd.S(0), spmd.S(1)), dst=(spmd.P, spmd.P))
 ```
+
+## Running the type checker
+
+### What an error looks like
+
+Let's return to the motivating example: a column-parallel linear where you
+forgot `copy_to_tensor_model_parallel_region` (in our API: `convert(I, R)`).
+The input is Invariant on TP, the weight is Varying on TP, and the moment
+they meet the checker reports:
+
+```text
+SpmdTypeError: Invariant type on axis mesh_tp cannot mix with other types. Found types: [I, V]
+Are you missing a collective or a reinterpret/convert call? e.g.,
+  convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)
+
+  In linear(
+    args[0]: f32[2, 8] {mesh_dp: V, mesh_tp: I},
+    args[1]: f32[6, 8] {mesh_dp: R, mesh_tp: V},
+  ) under mesh {mesh_dp, mesh_tp}
+```
+
+Note that the error fires in the *forward* pass, at the exact operator where
+the inconsistency occurs -- even though the actual numerical bug (a missing
+all-reduce on the gradient) would only have manifested in backward, as a
+silently wrong gradient.  This is the central trick of local SPMD types: by
+distinguishing I from R in the forward, errors in backward communication
+become forward type errors.
+
+By default, tracebacks are filtered to hide spmd_types internals; set the
+environment variable `SPMD_TYPES_TRACEBACK_FILTERING=off` if you want the
+full unfiltered traceback.
+
+### Strict versus permissive mode
+
+In strict mode (the default), an operator that mixes typed and untyped
+tensor operands raises an error.  This is what you want at steady state: an
+untyped tensor is usually a parameter or input you forgot to annotate, and
+catching it at first use keeps the types airtight.
+
+When you are *porting* an existing codebase, however, strict mode means you
+cannot run the checker at all until every last tensor is annotated.
+Permissive mode relaxes this: typed and untyped operands may mix, and the
+output is typed on a best-effort basis from whatever operands have types.
+
+```python
+with typecheck(strict_mode="permissive"):
+    loss = model(input)
+```
+
+The recommended porting workflow is: start in permissive mode, annotate
+parameters and inputs module by module (verifying with type asserts on
+module outputs as you go), and switch to strict mode once the whole model
+passes, to lock in full coverage.
+
+A few details of strict mode worth knowing:
+
+* Factory functions with deterministic values (`torch.zeros`, `torch.ones`,
+  `torch.full`, `torch.arange`, ...) produce tensors typed Replicate on
+  every axis of the current mesh.  Random factories (`torch.randn`,
+  `torch.empty`, ...) produce *untyped* tensors -- the checker cannot know
+  whether your generator state is synchronized across ranks -- so seed
+  tensors from data loaders and RNG must be explicitly annotated.
+
+* `spmd.no_typecheck()` is a context manager (used like `torch.no_grad()`)
+  that temporarily disables type checking on the current thread.  Use it for
+  code that is not part of SPMD compute: logging, metrics, checkpointing,
+  optimizer internals, or distributed-wrapper machinery (see the FSDP
+  section below).
+
+### Type checking the loss and backward
+
+Although a forward pass is sufficient for typechecking, you will usually run
+backward anyway (the checker propagates types through gradients too, and a
+training loop calls backward regardless).  At the point you call
+`loss.backward()`, the checker enforces one extra rule: the implicit
+`grad_output` is a `1.0` scalar materialized identically on every rank --
+which is to say, Invariant -- so **the loss must be Invariant or Partial on
+every mesh axis**.
+
+* A *Varying* loss is rejected: each rank would differentiate a different
+  scalar with no declared relationship between them.  Usually you want
+  `spmd.reinterpret(loss, pg, src=spmd.V, dst=spmd.P)`, declaring that the
+  semantic loss is the (pending) sum of the per-rank losses.  This is
+  exactly the standard data-parallel situation: the global loss is the sum
+  over all ranks' microbatches, and the DP gradient all-reduce is its
+  backward.
+
+* A *Replicate* loss is rejected: R's gradient is P, but the implicit
+  grad_output is Invariant, not Partial.  A Replicate loss usually means an
+  upstream `all_reduce(dst=R)` should have been `all_reduce(dst=I)` -- or,
+  better, that you should remove the all-reduce entirely and call backward
+  on the local Partial loss, which is also one fewer collective.
+
+This rule catches a classic bug: all-reducing the loss "to log it" and then
+backwarding through the reduced value, which double-counts gradient
+contributions.
+
+### Debugging with trace
+
+When a type error fires far from its root cause (a tensor got the wrong type
+twenty ops ago), enable trace logging.  Under `spmd.trace()`, every
+non-trivial operator logs its callsite, name, input types, and output type
+to the `spmd_types.runtime.trace` logger at INFO level:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+
+with typecheck(), spmd.trace():
+    loss = model(input)
+```
+
+```text
+my_model.py:42  linear({tp: R}, {tp: V}) -> {tp: V}
+my_model.py:43  all_reduce({tp: V}) -> {tp: I}
+```
+
+You can also set the environment variable `SPMD_TYPES_TRACE=1` to enable
+tracing globally, and use `spmd.trace(enabled=False)` to suppress it for a
+noisy region.
+
+### Raw torch.distributed collectives
+
+If your code calls `torch.distributed` collectives directly (rather than the
+`spmd_types` wrappers), the checker still type-checks the common ones
+(`all_reduce`, `all_gather`, `all_gather_into_tensor`, `all_to_all_single`,
+`reduce_scatter_tensor`).  Raw collectives are not differentiable, so the
+checker only validates forward types: e.g., `dist.all_reduce(x)` requires
+`x` to be Partial and retypes it in place to Replicate.  This is mainly
+useful for non-differentiable code (statistics, token counts); inside the
+model proper you should use the differentiable `spmd_types` collectives so
+that backward is checked too.
 
 ## Advice about Invariant vs Replicate
 
@@ -801,3 +1009,126 @@ to `MeshAxis` objects (you can also pass a `DeviceMesh` directly); the
 collective calls take the `ProcessGroup`.
 
 ### Putting it all together
+
+Here is a complete, runnable example: a sequence-parallel TP transformer MLP
+block (wrapper responsibility convention), typechecked end to end in a
+single process with a fake process group.  This stitches together the
+pieces from the sections above: mesh setup, parameter annotation, the
+col-parallel/row-parallel pair, and the Partial loss.
+
+```python
+import itertools
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
+
+import spmd_types as spmd
+from spmd_types.checker import typecheck
+
+
+class RMSNorm(nn.Module):
+    """SP region module, wrapper responsibility: weight is R, no conversions."""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        spmd.assert_type(x, {"dp": spmd.V, "tp": spmd.V})
+        norm = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+        return norm * self.weight
+
+
+class ColParallelLinear(nn.Module):
+    def __init__(self, in_features, out_features_local, tp_pg):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features_local, in_features))
+        self.tp_pg = tp_pg
+
+    def forward(self, x):
+        # S(0) -> R: all-gather the sequence; backward is reduce-scatter
+        x = spmd.all_gather(x, self.tp_pg, src=spmd.S(0), dst=spmd.R)
+        return F.linear(x, self.weight)
+
+
+class RowParallelLinear(nn.Module):
+    def __init__(self, in_features_local, out_features, tp_pg):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features_local))
+        self.tp_pg = tp_pg
+
+    def forward(self, x):
+        out = F.linear(x, self.weight)  # V x V -> implicitly partial
+        # P -> S(0): reduce-scatter back to sequence sharding
+        return spmd.reduce_scatter(out, self.tp_pg, dst=spmd.S(0))
+
+
+class MLPBlock(nn.Module):
+    def __init__(self, dim, hidden_local, tp_pg):
+        super().__init__()
+        self.norm = RMSNorm(dim)
+        self.up = ColParallelLinear(dim, hidden_local, tp_pg)
+        self.down = RowParallelLinear(hidden_local, dim, tp_pg)
+
+    def forward(self, x):
+        return x + self.down(F.relu(self.up(self.norm(x))))
+
+
+def annotate_params(model):
+    """TP-sharded params are V on tp; everything else R (wrapper resp.)."""
+    tp_sharded = {model.up.weight, model.down.weight}
+    for p in itertools.chain(model.parameters(), model.buffers()):
+        tp_type = spmd.V if p in tp_sharded else spmd.R
+        spmd.assert_type(p, {"dp": spmd.R, "tp": tp_type})
+
+
+# Single process, fake comms: 8 "ranks" arranged as 2 (dp) x 4 (tp)
+dist.init_process_group(backend="fake", rank=0, world_size=8)
+mesh = init_device_mesh("cpu", (2, 4), mesh_dim_names=("dp", "tp"))
+tp_pg = mesh.get_group("tp")
+
+dim, hidden, seq, tp_size = 16, 32, 8, 4
+model = MLPBlock(dim, hidden // tp_size, tp_pg)
+
+with spmd.set_current_mesh(mesh), typecheck(local=True):
+    annotate_params(model)
+
+    # Input: batch sharded over dp, sequence sharded over tp (sequence
+    # parallel), so the local tensor holds seq // tp_size positions.
+    x = torch.randn(seq // tp_size, dim, requires_grad=True)
+    spmd.assert_type(x, {"dp": spmd.V, "tp": spmd.V})
+
+    out = model(x)
+    spmd.assert_type(out, {"dp": spmd.V, "tp": spmd.V})
+
+    # The local loss is Varying; declare that the semantic loss is the
+    # pending sum of the per-rank losses, then backward.
+    loss = out.square().mean()
+    loss = spmd.reinterpret(loss, "dp", src=spmd.V, dst=spmd.P)
+    loss = spmd.reinterpret(loss, "tp", src=spmd.V, dst=spmd.P)
+    loss.backward()
+
+dist.destroy_process_group()
+```
+
+Things to try, to see the checker catch real bugs.  The interesting bugs
+are the ones that do *not* change any tensor shape or forward value -- those
+are the ones that silently corrupt gradients in a real run:
+
+* Change `dst=spmd.R` to `dst=spmd.I` in the `all_gather`: the forward
+  values are identical, but the backward now slices the gradient instead of
+  reduce-scattering it, silently dropping the other ranks' contributions.
+  The checker raises an I/V mixing error at the very next `F.linear`.
+
+* Change `annotate_params` to give `norm.weight` the type `{"tp": spmd.I}`
+  (module responsibility convention) without adding the corresponding
+  `invariant_to_replicate`: again a silent missing all-reduce on the weight
+  gradient in a real run, caught as an I/V mixing error inside `RMSNorm`.
+
+* Replace the final `reinterpret` calls with
+  `spmd.all_reduce(loss, dp_pg, src=spmd.V, dst=spmd.R)`: the checker
+  rejects backward on a Replicate loss (see "Type checking the loss and
+  backward" above).
