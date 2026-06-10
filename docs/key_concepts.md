@@ -91,10 +91,10 @@ different `pg_options` for a mesh axis, and it matters which specific
 `ProcessGroup` is used for the communication:
 
 ```python
-# Example: ProcessGroup
+# Example: with a ProcessGroup you created directly
 spmd.all_reduce(x, tp_pg, src=spmd.P, dst=spmd.R)
 
-# Example: DeviceMesh
+# Example: with a ProcessGroup obtained from a DeviceMesh
 tp_group = mesh.get_group("tp")
 spmd.all_reduce(x, tp_group, src=spmd.P, dst=spmd.R)
 ```
@@ -191,7 +191,8 @@ SPMD types, true to its name, is designed for single-program multiple-data
 (SPMD) parallelism.  This means it is inappropriate for checking safety
 properties of MPMD parallelism; most notably pipeline parallelism.
 
-That being said, pipeline parallelism is typically combined SPMD parallelism,
+That being said, pipeline parallelism is typically combined with SPMD
+parallelism,
 and it is still profitable to check the SPMD parallel bits.  The easiest setup,
 if possible, is to just SPMD typecheck the entire model, without PP, prior to
 splitting into PP stages.  If you can only typecheck an individual PP stage,

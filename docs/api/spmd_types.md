@@ -31,6 +31,12 @@ Core type hierarchy for distributed tensor expressions.
 .. autoclass:: spmd_types.types.TensorSharding
 ```
 
+### Scalar
+
+```{eval-rst}
+.. autoclass:: spmd_types.Scalar
+```
+
 ### SpmdTypeError
 
 ```{eval-rst}
@@ -47,6 +53,10 @@ Device mesh setup and axis management.
 .. autofunction:: spmd_types.current_mesh
 
 .. autoclass:: spmd_types.MeshAxis
+
+.. autofunction:: spmd_types.reinterpret_mesh
+
+.. autofunction:: spmd_types.set_dist
 ```
 
 ## Runtime
@@ -60,6 +70,8 @@ be imported in model code without pulling in the heavy checker logic.
 
 .. autofunction:: spmd_types.runtime.assert_local_type
 
+.. autofunction:: spmd_types.runtime.assert_type_like
+
 .. autofunction:: spmd_types.runtime.mutate_type
 
 .. autofunction:: spmd_types.runtime.has_local_type
@@ -68,9 +80,15 @@ be imported in model code without pulling in the heavy checker logic.
 
 .. autofunction:: spmd_types.runtime.trace
 
+.. autofunction:: spmd_types.runtime.local_map
+
+.. autofunction:: spmd_types.runtime.local
+
 .. autofunction:: spmd_types.runtime.register_autograd_function
 
 .. autofunction:: spmd_types.runtime.register_local_autograd_function
+
+.. autofunction:: spmd_types.runtime.register_decomposition
 ```
 
 ## Local Operations

@@ -31,6 +31,7 @@ def set_current_mesh(
 
     Args:
         axes: The mesh to set. Accepts:
+
             - A ``dict[str, MeshAxis]`` mapping names to axes (preferred).
             - A ``DeviceMesh`` whose named dimensions are converted to MeshAxis
               (names are taken from ``mesh_dim_names``).

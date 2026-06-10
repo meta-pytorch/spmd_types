@@ -52,10 +52,11 @@ Local SPMD types has two aims:
 
 ## Basics
 
-To typecheck your model, there are three things you must do:
+To typecheck your model, there are four things you must do:
 
-1. You have to specify your compute mesh with `spmd.set_current_mesh`,
-   see key concepts for a discussion about what a compute mesh is (TODO: link)
+1. You have to specify your compute mesh with `spmd.set_current_mesh`;
+   see [Key concepts](key_concepts.md) for a discussion about what a compute
+   mesh is.
 
 2. You must annotate all input tensors and parameters with appropriate local
    SPMD types.  There is some interaction with distributed module wrappers
@@ -68,7 +69,16 @@ To typecheck your model, there are three things you must do:
 
 4. You run the forward (backward not needed) of your model under the
    `spmd_types.checker.typecheck(local=True)` context manager (`local=True`
-   indicates that you only want local SPMD type checking.)
+   indicates that you only want local SPMD type checking.)  Every tensor is
+   annotated with a local SPMD type, and typechecking propagates the
+   annotations through the execution of the model:
+
+   ```python
+   from spmd_types.checker import typecheck
+
+   with typecheck(local=True):
+       loss = model(input)
+   ```
 
 ### Types
 
@@ -104,7 +114,7 @@ Assuming an appropriate `set_current_mesh` has been set, the idiomatic usage
 of `spmd.assert_type` is to give it a dictionary of mesh axes names to
 per-axis type, e.g.:
 
-```
+```python
 spmd.assert_type(t, {"tp": spmd.I})
 ```
 
@@ -119,7 +129,7 @@ section.
 
 `spmd_types` provides its own versions of distributed collectives and local
 operations which interact with the types in a non-trivial way.  You can
-read the full API reference at TODO.  Here are some high level conceptual
+read the full [API reference](api/index.md).  Here are some high level conceptual
 ideas to keep in mind while reading the API reference:
 
 * We omit `src` on the reduction APIs (`all_reduce`, `reduce_scatter`),
@@ -134,7 +144,7 @@ ideas to keep in mind while reading the API reference:
 
 * `spmd.reinterpret` and `spmd.convert` are not collectives, but instead
   type "conversion" functions that change the local SPMD type of their tensor.
-  A `reinterpret` is guaranteed to do no work (it keeps the local data exactly
+  A `reinterpret` is guaranteed to do no work (it keeps the local data
   exactly as is, unchanged), while a `convert` is guaranteed to be global SPMD
   semantics preserving (e.g., a tensor that sharded on tensor dim 0, is
   semantically equivalent to the full tensor you get by concatenating all the
@@ -150,8 +160,8 @@ Megatron function                                       spmd_types function
 ---------------------------------------------------------------------------------------------------------
 copy_to_tensor_model_parallel_region(x)                 spmd.convert       (x, tp, src=spmd.I,      dst=spmd.R)
 reduce_from_tensor_model_parallel_region(x)             spmd.all_reduce    (x, tp,                  dst=spmd.I)
-scatter_to_tensor_model_parallel_region(x)              spmd.reduce_scatter(x, tp,                  dst=spmd.S(-1))
-gather_from_tensor_model_parallel_region(x)             spmd.all_gather    (x, tp, src=spmd.S(-1),  dst=spmd.R)
+scatter_to_tensor_model_parallel_region(x)              spmd.convert       (x, tp, src=spmd.I,      dst=spmd.S(-1))
+gather_from_tensor_model_parallel_region(x)             spmd.all_gather    (x, tp, src=spmd.S(-1),  dst=spmd.I)
 scatter_to_sequence_parallel_region(x)                  spmd.convert       (x, tp, src=spmd.I,      dst=spmd.S(0))
 gather_from_sequence_parallel_region(x, tensor_parallel_output_grad=True)
                                                         spmd.all_gather    (x, tp, src=spmd.S(0),   dst=spmd.R)
@@ -234,7 +244,9 @@ In global SPMD, producing partial at the point of contraction (via
 
 A strategy that works better with global SPMD types is to explicitly annotate
 a local operation (e.g., a sum, a linear or an einsum) as producing a partial
-output.  For example, when you sum over a sharded
+output.  (NOTE: the functions described in the rest of this section are
+planned API: they are not implemented yet, and their signatures may change.)
+For example, when you sum over a sharded
 dimension, in local SPMD semantics you would do a per-rank summation; in
 global SPMD semantics, you still need to do a summation across all the ranks.
 You can clearly specify that you meant to do the full summation (but are
@@ -263,14 +275,6 @@ are multiple mesh axes which are producing pending reductions, e.g.,
 spmd.sum(x, (ax1, ax2), src=(spmd.S(0), spmd.S(1)), dst=(spmd.P, spmd.P))
 ```
 
-TODO: These functions are not implemented yet
-
-TODO: spmd.P is very "explicit", there's probably a shorter form, is
-uniformity better?
-
-TODO: Is three tuples good, or you want to keep `ax1, src=spmd.S(0),
-dst=spmd.P` together?
-
 ## Advice about Invariant vs Replicate
 
 Although Megatron contains many functions for working with the Invariant type,
@@ -296,8 +300,8 @@ R -> P      convert(R,P)            R -> P      convert(R,P)
 I -> R      convert(I,R)            P -> I      all_reduce(I)
 V -> R      all_gather(R)           P -> V      reduce_scatter()
 V -> V      all_to_all()            V -> V      all_to_all()
-V -> R      all_reduce(src=V,R)     P -> R      all_reduce(R)
-V -> V      reduce_scatter(src=V)   V -> R      all_gather(R)
+V -> R      all_reduce(src=V,R)     P -> R      all_reduce(R)    (*)
+V -> V      reduce_scatter(src=V)   V -> R      all_gather(R)    (*)
 P -> R      all_reduce(R)           P -> R      all_reduce(R)
 P -> V      reduce_scatter()        V -> R      all_gather(R)
 ----------------------------------------------------------------------------
@@ -307,19 +311,11 @@ I -> V      convert(I,V)            V -> I      all_gather(I)
 ----------------------------------------------------------------------------
 ```
 
-### Type checking
-
-We typecheck a model for local SPMD types by running its forward pass with
-typechecking enabled.  Every tensor is annotated with a local SPMD type, and
-typechecking propagates the annotations through the execution of the model.
-This means you must also annotate the inputs and parameters
-
-```
-from spmd_types.checker import typecheck
-
-with typecheck(local=True):
-    loss = model(input)
-```
+(*) The `src=V` variants are composites: the forward implicitly does
+`reinterpret(V,P)` before reducing, so their backward is the listed
+collective followed by the backward of that reinterpret, `reinterpret(R,V)`
+(a no-op on the local tensor).  The end-to-end backward types are thus
+`P -> V` for `all_reduce(src=V,R)` and `V -> V` for `reduce_scatter(src=V)`.
 
 ## Examples
 
@@ -337,16 +333,17 @@ the types at the interface boundary.
 The calling convention for data and context parallelism is quite simple: it is
 essentially universally understood that all PyTorch modules take inputs that
 are sharded on the batch/context dimension `{"dp": spmd.V, "cp": spmd.V}` and
-will compute gradients parameters with a pending reduction on the DP/CP mesh
-axes `{"dp": spmd.R, "cp": spmd.R}`.  That is to say, a module never takes
+have parameters typed `{"dp": spmd.R, "cp": spmd.R}`, whose gradients are
+therefore Partial -- a pending reduction on the DP/CP mesh
+axes.  That is to say, a module never takes
 care of this reduction by itself; instead, there is typically some out-of-band
 mechanism (e.g., a backward hook registered by FSDP2) that actually takes care
 of this reduction.  This is not a coincidence: the enduring stickiness of
 FSDP-style approaches to parallelism is that they work on code written for a
 single GPU without modification.
 
-This suggests a specific strategy for perform local SPMD types annotations for
-DP/CP, in the absence of a distributed wrapper like FSDP:
+This suggests a specific strategy for performing local SPMD type annotations
+for DP/CP, in the absence of a distributed wrapper like FSDP:
 
 - Because every parameter essentially universally has the same local SPMD
   type, the most convenient thing to do is to have a helper that traverses
@@ -362,16 +359,16 @@ DP/CP, in the absence of a distributed wrapper like FSDP:
 
 A default helper that doesn't handle expert parallelism might look like this:
 
-```
+```python
 def assert_dp_cp_params(module: nn.Module) -> None:
-    for tensor in itertools.chain(m.parameters(), m.buffers()):
+    for tensor in itertools.chain(module.parameters(), module.buffers()):
         spmd.assert_type(tensor, {"dp": spmd.R, "cp": spmd.R})
 ```
 
 Here's the typical flow of local SPMD types for DP/CP; the inputs/outputs are
 varying and the weights are replicated:
 
-```
+```python
 def forward(self, x):
     spmd.assert_type(x,           {"dp": spmd.V, "cp": spmd.V})
     spmd.assert_type(self.weight, {"dp": spmd.R, "cp": spmd.R})
@@ -408,7 +405,9 @@ all-gathers and reduce-scatters necessary to make your original single GPU
 code work without modification.  So there isn't any benefit from attempting to
 do local SPMD types in FSDP's internals.  (Additionally, it's also often
 quite confusing to do so, because FSDP operates on the model mesh while
-your SPMD type checking is operating on the compute mesh -- TODO link.)
+your SPMD type checking is operating on the compute mesh -- see
+[Key concepts](key_concepts.md) for the model versus compute mesh
+distinction.)
 
 What you should do is:
 
@@ -504,7 +503,7 @@ axis of modules outside of the TP region.
 **Non-TP region module.**  Consider an RMSNorm outside of the TP region.  It
 will have the following types:
 
-```
+```python
 def forward(self, input: torch.Tensor) -> torch.Tensor:
     spmd.assert_type(input,       {"tp": spmd.I})
     spmd.assert_type(self.weight, {"tp": spmd.I})
@@ -522,7 +521,7 @@ region: so we transition from being `"tp": spmd.I` to `"tp": spmd.V`.  A
 backwards collective must be introduced to ensure gradients are computed in
 lock-step in the non-TP region.  Here is what the types look like here:
 
-```
+```python
 def forward(self, x):
     spmd.assert_type(x,           {"tp": spmd.I})
     spmd.assert_type(self.weight, {"tp": spmd.V})
@@ -541,7 +540,7 @@ of the TP region, transitioning from `"tp": spmd.V` to `"tp": spmd.I`.  To
 do this, we have to issue the all-reduce on the result of the linear,
 to discharge the pending reduction.
 
-```
+```python
 def forward(self, x):
     spmd.assert_type(x,           {"tp": spmd.V})
     spmd.assert_type(self.weight, {"tp": spmd.V})
@@ -580,7 +579,7 @@ I include them here for completeness.
 to explicitly specify in the collective what dimension the sequence dim
 is for the all-gather, so we can concat (not stack) on it!
 
-```
+```python
 def forward(self, x):
     spmd.assert_type(x,           {"tp": spmd.V})
     spmd.assert_type(self.weight, {"tp": spmd.V})
@@ -596,7 +595,7 @@ def forward(self, x):
 
 **Row-parallel linear with sequence parallel.**
 
-```
+```python
 def forward(self, x):
     spmd.assert_type(x,           {"tp": spmd.V})
     spmd.assert_type(self.weight, {"tp": spmd.V})
@@ -638,7 +637,7 @@ But there is some hidden complexity: only *some* parameters require a TP
 all-reduce (the non-TP sharded ones), and your wrapper has to keep track of who
 should get a reduction and who doesn't!
 
-```
+```python
 def forward(self, input: torch.Tensor) -> torch.Tensor:
     spmd.assert_type(input,       {"tp": spmd.V})
     spmd.assert_type(self.weight, {"tp": spmd.R})
@@ -654,7 +653,7 @@ weight is annotated `spmd.I`, and local SPMD types forces us to insert the
 conversion `spmd.invariant_to_replicate` which ensures we run the all-reduce in
 backwards.
 
-```
+```python
 def forward(self, input: torch.Tensor) -> torch.Tensor:
     spmd.assert_type(input,       {"tp": spmd.V})
     spmd.assert_type(self.weight, {"tp": spmd.I})
@@ -672,7 +671,8 @@ We generally advise you to follow whatever the prevailing conventions in your
 training codebase are, when adding local SPMD types.  However, we *do* think
 it's better to follow a wrapper's responsibility convention.  It simplifies
 your SP-region model code, and it also makes it possible to apply a small
-corretness fix when you have a small parameter is neither TP nor FSDP sharded.
+correctness fix when you have a small parameter that is neither TP nor FSDP
+sharded.
 In this case, in backwards you need to all-reduce on DP/CP and an all-reduce on
 TP for this gradient's weights.  NCCL doesn't guarantee that doing two sequential
 all-reduces on different PGs gives bitwise equivalent results across all ranks
@@ -695,7 +695,7 @@ To summarize:
   spmd.R` accordingly.  If you are wrapper responsibility, consider having the
   wrapper apply this type according to the same rule by which it decides what
   parameters require a TP all-reduce: the presence of this TP all-reduce is
-  the source of truth for the local SPMD type: if you get it wrong, the the
+  the source of truth for the local SPMD type: if you get it wrong, the
   typechecker won't be able to tell if we've missed or duplicated an
   all-reduce on a gradient.
 
@@ -722,7 +722,7 @@ described for DP/CP.
 **FSDP on Tensor parameters (new).**  What if I want to operate on plain
 tensors?  Today, stock FSDP2 doesn't support tensor parallelism with an
 original plain Tensor input.  We need a new API to support this.  (Note
-that some FSDP2 forks already support this mode of us.)  The main reason why
+that some FSDP2 forks already support this mode of use.)  The main reason why
 you can't just implicitly have already TP sharded your weights is because
 checkpointing needs to know that your weights are TP sharded, and there is
 no PyTorch-native mechanism of indicating TP sharding without using DTensor.
@@ -753,19 +753,51 @@ replicated parameters.
 
 ### Expert parallelism
 
+Expert parallelism is the most common reason to use a second compute mesh:
+inside the expert region, the DP/CP/TP axes are reorganized into expert data
+parallel (`edp`), expert parallel (`ep`) and expert tensor parallel (`etp`)
+axes covering the same devices.  Here is a sketch of a token dispatch /
+combine for an expert-parallel MoE layer (helper functions elided); the
+comments track the local SPMD type of the activations after each call:
+
+```python
+def forward(hidden, topk, routes):                       # {dp: V, cp: V, tp: V}
+    x, topk, token_ids = prepare_activations(hidden, topk)
+    with spmd.set_current_mesh({
+        "edp": spmd.MeshAxis.of(edp_pg),
+        "ep": spmd.MeshAxis.of(ep_pg),
+        "etp": spmd.MeshAxis.of(etp_pg),
+    }):
+        # x is reinterpreted onto the expert mesh       -> {edp: V, ep: V, etp: V}
+        counts = spmd.all_gather(
+            routes.sum(dim=0), etp_pg, src=spmd.S(0), dst=spmd.R
+        )                                                # {edp: V, ep: V, etp: R}
+        counts = spmd.all_gather(
+            counts, ep_pg, src=spmd.S(0), dst=spmd.R
+        )                                                # {edp: V, ep: R, etp: R}
+        ep_in, ep_out, etp_splits = derive_splits(counts)
+        x = spmd.all_to_all(
+            x, ep_pg, src=spmd.S(0), dst=spmd.S(0),
+            input_split_sizes=ep_in, output_split_sizes=ep_out,
+        )                                                # {edp: V, ep: V, etp: V}
+        x = spmd.all_gather(
+            x, etp_pg, src=spmd.S(0), dst=spmd.R, split_sizes=etp_splits
+        )                                                # {edp: V, ep: V, etp: R}
+        x = expert_fn(x)                                 # {edp: V, ep: V, etp: P}
+        x = spmd.reduce_scatter(
+            x, etp_pg, dst=spmd.S(0), split_sizes=etp_splits
+        )                                                # {edp: V, ep: V, etp: V}
+        x = spmd.all_to_all(
+            x, ep_pg, src=spmd.S(0), dst=spmd.S(0),
+            input_split_sizes=ep_out, output_split_sizes=ep_in,
+        )                                                # {edp: V, ep: V, etp: V}
+    return unpermute_and_combine(x, topk, token_ids, hidden)  # {dp: V, cp: V, tp: V}
 ```
-def forward(hidden, topk, routes):                                   # {DP: V, CP: V, TP: V}
-  x, topk, token_ids = prepare_activations(hidden, topk)
-  with spmd.set_current_mesh({EDP, EP, ETP}):                        # {EDP: V, EP: V, ETP: V}
-    global_counts = spmd.all_gather(routes.sum(dim=0), ETP, S(0), R) # {EDP: V, EP: V, ETP: R}
-    global_counts = spmd.all_gather(global_counts, EP, S(0), R)      # {EDP: V, EP: R, ETP: R}
-    ep_is, ep_os, etps = derive_splits(global_counts)
-    x = spmd.all_to_all(x, EP, S(0), S(0), ep_is, ep_os)             # {EDP: V, EP: V, ETP: V}
-    x = spmd.all_gather(x, ETP, S(0), R, split_sizes=etps)           # {EDP: V, EP: V, ETP: R}
-    x = expert_fn(x)                                                 # {EDP: V, EP: V, ETP: P}
-    x = spmd.reduce_scatter(x, ETP, P, S(0), split_sizes=etps)       # {EDP: V, EP: V, ETP: V}
-    x = spmd.all_to_all(x, EP, S(0), S(0), ep_os, ep_is)             # {EDP: V, EP: V, ETP: V}
-  return unpermute_and_combine(x, topk, token_ids, hidden)           # {DP: V, CP: V, TP: V}
-```
+
+Note that entering the inner `set_current_mesh` causes tensors typed on the
+outer mesh to be implicitly reinterpreted onto the expert mesh (see
+`reinterpret_mesh`).  The dict passed to `set_current_mesh` maps axis names
+to `MeshAxis` objects (you can also pass a `DeviceMesh` directly); the
+collective calls take the `ProcessGroup`.
 
 ### Putting it all together
