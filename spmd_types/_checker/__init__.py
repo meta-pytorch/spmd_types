@@ -74,8 +74,6 @@ from spmd_types.runtime import (  # noqa: F401
     trace,
 )
 from spmd_types.types import (
-    _canonicalize_shard,
-    _check_orthogonality,
     DeviceMeshAxis,
     DTensorPropagationError,
     format_axis,
@@ -941,6 +939,8 @@ _OP_REGISTRY: dict[Callable, _OpSpec] = {
     torch.Tensor.mean: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.nansum: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.nanmean: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.cumsum: _OpSpec(OpLinearity.LINEAR, (0,)),
+    torch.Tensor.cumsum: _OpSpec(OpLinearity.LINEAR, (0,)),
     # =================================================================
     # LINEAR -- concat / stack (tensor list at pos 0)
     # =================================================================
@@ -1680,7 +1680,7 @@ def _set_result_partition_spec(
             _set_partition_spec(item, spec)
 
 
-def _collect_shard_axes(
+def _collect_shard_axes(  # noqa: C901
     partition_specs: list[PartitionSpec | None],
     global_axes: set[MeshAxis],
 ) -> tuple[list[MeshAxis], dict[MeshAxis, set[MeshAxis]]]:

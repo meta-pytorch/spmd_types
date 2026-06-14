@@ -1052,6 +1052,12 @@ class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):
         result_op = -x
         self.assertIs(get_axis_local_type(result_op, self.pg), P)
 
+    def test_cumsum_preserves_p(self):
+        """torch.cumsum(P) should give P."""
+        x = self._generate_inputs((4,), self.pg, P)
+        result = torch.cumsum(x, dim=0, dtype=torch.int32)
+        self.assertIs(get_axis_local_type(result, self.pg), P)
+
     def test_operator_add_p_p(self):
         """P + P via the + operator should give P."""
         x = self._generate_inputs((4,), self.pg, P)
