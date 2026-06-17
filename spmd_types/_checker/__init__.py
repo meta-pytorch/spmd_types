@@ -2086,11 +2086,16 @@ class _ShardPropagator:
         """
         mesh = self._get_mesh(axis.size())
 
+        from torch.utils._python_dispatch import _disable_current_modes
+
+        # Keep checker-internal fake DTensor propagation invisible to active
+        # TorchDispatchModes such as selective activation checkpointing's
+        # caching mode.
         # Disable LocalTensorMode during meta DTensor propagation.
         # DTensor.from_local calls mesh.get_coordinate() which, under
         # LocalTensorMode(N), tries to map all N simulated ranks into
         # the propagator's fake 1-D mesh.
-        with maybe_disable_local_tensor_mode():
+        with maybe_disable_local_tensor_mode(), _disable_current_modes():
             meta_args = torch.utils._pytree.tree_map(
                 lambda x: self._to_meta_dtensor(x, axis, mesh), args
             )
