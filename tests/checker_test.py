@@ -17,7 +17,20 @@ import unittest
 import expecttest
 import torch
 import torch.distributed as dist
-from spmd_types import I, Infer, local, local_map, P, R, S, Scalar, set_current_mesh, V
+from spmd_types import (
+    assert_local_type_like,
+    assert_type_like,
+    I,
+    Infer,
+    local,
+    local_map,
+    P,
+    R,
+    S,
+    Scalar,
+    set_current_mesh,
+    V,
+)
 from spmd_types._checker import (
     _trace_logger,
     _validate_partition_spec_for_global_spmd,
@@ -985,6 +998,38 @@ class TestAssertTypeShardSugar(LocalTensorTestCase):
         x = torch.tensor(1.0)
         with self.assertRaises(SpmdTypeError):
             assert_type(x, {self.tp: S(0)})
+
+
+class TestAssertTypeLikePartitionSpec(LocalTensorTestCase):
+    """Test that assert_type_like copies the source PartitionSpec."""
+
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+        cls.dp = mesh.get_group("dp")
+        cls.tp = mesh.get_group("tp")
+
+    def test_assert_type_like_copies_partition_spec(self):
+        x = torch.randn(4, 3)
+        out = torch.empty_like(x)
+        assert_type(x, {self.dp: S(0), self.tp: R})
+
+        assert_type_like(out, x)
+
+        self.assertEqual(get_partition_spec(out), get_partition_spec(x))
+
+    def test_assert_local_type_like_skips_partition_spec(self):
+        x = torch.randn(4, 3)
+        out = torch.empty_like(x)
+        assert_type(x, {self.dp: S(0), self.tp: R})
+
+        assert_local_type_like(out, x)
+
+        self.assertEqual(get_local_type(out), get_local_type(x))
+        self.assertIsNone(get_partition_spec(out))
 
 
 class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):

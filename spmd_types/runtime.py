@@ -553,6 +553,21 @@ def assert_type_like(
         assert_type_like(out, x, {mesh.CP: R})
     """
     full_type = {**get_local_type(source), **(overrides or {})}
+    assert_type(tensor, full_type, get_partition_spec(source))
+
+
+def assert_local_type_like(
+    tensor: torch.Tensor,
+    source: torch.Tensor,
+    overrides: dict[MeshAxis, LocalSpmdType] | None = None,
+) -> None:
+    """Like ``assert_type_like`` but copies only the per-axis local types.
+
+    Unlike ``assert_type_like``, the source's global ``PartitionSpec`` is not
+    propagated -- use this when only the local SPMD types should be carried
+    over and the result is not (or not yet) globally sharded.
+    """
+    full_type = {**get_local_type(source), **(overrides or {})}
     assert_type(tensor, full_type)
 
 
