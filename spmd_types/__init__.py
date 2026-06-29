@@ -85,6 +85,7 @@ from spmd_types.types import (  # noqa: F401
     Replicate,
     S,
     Shard,
+    SpmdType,
     SpmdTypeError,
     TensorSharding,
     V,

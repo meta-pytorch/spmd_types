@@ -228,6 +228,62 @@ def normalize_partition_spec(spec: PartitionSpec) -> PartitionSpec:
 
 
 # =============================================================================
+# SpmdType
+# =============================================================================
+
+
+@dataclass
+class SpmdType:
+    """Tensor type as local per-axis types plus optional global shard metadata.
+
+    ``local_type`` maps each mesh axis to its local per-axis SPMD type. ``S(dim)``
+    entries are kept verbatim until ``assert_type`` applies the type to a tensor
+    and can resolve them against the tensor rank.
+    """
+
+    local_type: PerMeshAxisSpmdTypes
+    partition_spec: PartitionSpec | None = None
+
+    def __post_init__(self) -> None:
+        if self.partition_spec is not None:
+            shard_axes = [
+                axis for axis, typ in self.local_type.items() if isinstance(typ, Shard)
+            ]
+            if shard_axes:
+                raise SpmdTypeError(
+                    "Cannot construct a SpmdType with both S(i) entries and "
+                    "an explicit PartitionSpec."
+                )
+
+            for entry in self.partition_spec:
+                if entry is None:
+                    continue
+                axes = entry if isinstance(entry, tuple) else (entry,)
+                for axis in axes:
+                    typ = self.local_type.get(axis)
+                    if typ is not None and typ is not V:
+                        raise SpmdTypeError(
+                            f"Mesh axis {format_axis(axis)} appears in PartitionSpec "
+                            f"(implying Varying/Shard) but is specified as {typ}."
+                        )
+
+        for axis, typ in self.local_type.items():
+            if not isinstance(typ, (PerMeshAxisLocalSpmdType, Shard)):
+                raise TypeError(
+                    f"Expected SPMD type (R, I, V, P, or S(i)) on axis "
+                    f"{format_axis(axis)}, got {typ!r}"
+                )
+
+        if self.partition_spec is not None:
+            for i, entry in enumerate(self.partition_spec):
+                if isinstance(entry, tuple) and len(entry) == 0:
+                    raise ValueError(
+                        f"PartitionSpec entry at dim {i} is an empty tuple. "
+                        f"Use None for replicated dimensions."
+                    )
+
+
+# =============================================================================
 # TensorSharding for Module Boundary Contracts
 # =============================================================================
 

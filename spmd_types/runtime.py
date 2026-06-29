@@ -57,6 +57,7 @@ from spmd_types.types import (
     PerMeshAxisSpmdTypes,
     Shard,
     shard_types_to_partition_spec,
+    SpmdType,
     SpmdTypeError,
     to_local_type,
     V,
@@ -290,7 +291,7 @@ _TensorOrSequence = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 @api_boundary
 def assert_type(  # noqa: C901
     tensor: _TensorOrSequence,
-    type: PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType,
+    type: SpmdType | PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType,
     partition_spec: PartitionSpec | None = None,
 ) -> _TensorOrSequence:
     """Assert or set the SPMD type on a tensor or sequence of tensors.
@@ -375,6 +376,18 @@ def assert_type(  # noqa: C901
             "operates on local tensors only; DTensor tracks its own "
             "placement metadata."
         )
+
+    ############ Expand SpmdType ############
+    if isinstance(type, SpmdType):
+        if partition_spec is not None:
+            raise TypeError(
+                "assert_type() cannot take both a SpmdType and a separate "
+                "partition_spec."
+            )
+        # ``local_type`` may still hold S(dim) entries (deferred construction);
+        # the canonicalization below resolves them against ``tensor.ndim``.
+        partition_spec = type.partition_spec
+        type = type.local_type
 
     ############ Expand bare PerMeshAxisLocalSpmdType ############
     if isinstance(type, PerMeshAxisLocalSpmdType):

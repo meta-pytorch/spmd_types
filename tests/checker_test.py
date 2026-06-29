@@ -47,7 +47,7 @@ from spmd_types._collectives import all_reduce
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type, get_local_type
-from spmd_types.types import normalize_axis, PartitionSpec, SpmdTypeError
+from spmd_types.types import normalize_axis, PartitionSpec, SpmdType, SpmdTypeError
 from torch.distributed._local_tensor import LocalTensorMode
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -1030,6 +1030,72 @@ class TestAssertTypeLikePartitionSpec(LocalTensorTestCase):
 
         self.assertEqual(get_local_type(out), get_local_type(x))
         self.assertIsNone(get_partition_spec(out))
+
+
+class TestSpmdType(LocalTensorTestCase):
+    """Test SpmdType validation and resolution via assert_type."""
+
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+        cls.dp = mesh.get_group("dp")
+        cls.tp = mesh.get_group("tp")
+
+    def test_s_entries_stay_unnormalized_until_assert_type(self):
+        spmd_type = SpmdType({"dp": S(0), "tp": R})
+
+        self.assertEqual(spmd_type.local_type, {"dp": S(0), "tp": R})
+        self.assertIsNone(spmd_type.partition_spec)
+
+    def test_s_entries_can_delay_partition_spec_until_tensor_rank(self):
+        # Without a tensor rank the S(dim) entries are kept verbatim in ``local``
+        # and there is no PartitionSpec yet.
+        spmd_type = SpmdType({self.dp: S(0), self.tp: S(-1)})
+        self.assertIsNone(spmd_type.partition_spec)
+        self.assertEqual(spmd_type.local_type[self.dp], S(0))
+        self.assertEqual(spmd_type.local_type[self.tp], S(-1))
+
+        # assert_type resolves the delayed shards using the tensor's rank.
+        x = torch.randn(4, 3, 5, 2)
+        assert_type(x, spmd_type)
+
+        self.assertEqual(get_axis_local_type(x, self.dp), V)
+        self.assertEqual(get_axis_local_type(x, self.tp), V)
+        self.assertEqual(
+            get_partition_spec(x),
+            PartitionSpec(normalize_axis(self.dp), None, None, normalize_axis(self.tp)),
+        )
+
+    def test_explicit_partition_spec_does_not_need_ndim(self):
+        spmd_type = SpmdType(
+            {"tp": R},
+            partition_spec=PartitionSpec("dp", None),
+        )
+
+        self.assertEqual(spmd_type.local_type, {"tp": R})
+        self.assertEqual(spmd_type.partition_spec, PartitionSpec("dp", None))
+
+    def test_rejects_invalid_types(self):
+        invalid_types = [
+            lambda: SpmdType({"dp": S(0)}, partition_spec=PartitionSpec("dp", None)),
+            lambda: SpmdType({"dp": R}, partition_spec=PartitionSpec("dp", None)),
+        ]
+
+        for make_type in invalid_types:
+            with (
+                self.subTest(make_type=make_type),
+                self.assertRaises(SpmdTypeError),
+            ):
+                make_type()
+
+    def test_rejects_multiple_s_entries_for_same_dim_when_asserted(self):
+        spmd_type = SpmdType({self.dp: S(0), self.tp: S(0)})
+
+        with self.assertRaises(SpmdTypeError):
+            assert_type(torch.randn(4, 3), spmd_type)
 
 
 class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):
