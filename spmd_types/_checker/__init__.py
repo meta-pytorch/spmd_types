@@ -883,13 +883,15 @@ class _OpSpec:
         tensor_kwargs: Kwarg names that are tensor inputs.
         tensor_varargs_from: If set, all positional args from this index onward
             are tensor inputs (for ops with *args like einsum).
+        nonlinear_args: Positional arg indices whose operand enters the op
+            nonlinearly and therefore must not be P.
     """
 
     linearity: OpLinearity
     tensor_args: tuple[int, ...] = ()
     tensor_kwargs: tuple[str, ...] = ()
     tensor_varargs_from: int | None = None
-    fixed_args: tuple[int, ...] = ()
+    nonlinear_args: tuple[int, ...] = ()
 
 
 _OP_REGISTRY: dict[Callable, _OpSpec] = {
@@ -1028,31 +1030,68 @@ _OP_REGISTRY: dict[Callable, _OpSpec] = {
     torch.Tensor.repeat_interleave: _OpSpec(OpLinearity.LINEAR, (0,)),
     torch.Tensor.unfold: _OpSpec(OpLinearity.LINEAR, (0,)),
     # =================================================================
-    # LINEAR with fixed_args -- division (linear in numerator only)
+    # MULTILINEAR with nonlinear_args -- division (linear in numerator only)
+    # Division is multiplicative, not additive: a lone P numerator scaled by an
+    # R/scalar divisor stays P, while LINEAR would reject this as affine.
+    # nonlinear_args additionally forbids P in the divisor because 1/y is
+    # nonlinear in y.
     # =================================================================
-    torch.div: _OpSpec(OpLinearity.LINEAR, (0, 1), ("input", "other"), fixed_args=(1,)),
+    torch.div: _OpSpec(
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("input", "other"),
+        nonlinear_args=(1,),
+    ),
     torch.divide: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("input", "other"), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("input", "other"),
+        nonlinear_args=(1,),
     ),
     torch.true_divide: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("input", "other"), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("input", "other"),
+        nonlinear_args=(1,),
     ),
-    torch.Tensor.div: _OpSpec(OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)),
+    torch.Tensor.div: _OpSpec(
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
+    ),
     torch.Tensor.divide: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
     ),
     torch.Tensor.true_divide: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
     ),
-    torch.Tensor.div_: _OpSpec(OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)),
+    torch.Tensor.div_: _OpSpec(
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
+    ),
     torch.Tensor.__truediv__: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
     ),
     torch.Tensor.__rtruediv__: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(0,)
+        OpLinearity.MULTILINEAR, (0, 1), ("other",), nonlinear_args=(0,)
     ),
     torch.Tensor.__itruediv__: _OpSpec(
-        OpLinearity.LINEAR, (0, 1), ("other",), fixed_args=(1,)
+        OpLinearity.MULTILINEAR,
+        (0, 1),
+        ("other",),
+        nonlinear_args=(1,),
     ),
     # =================================================================
     # MULTILINEAR -- multiplication
@@ -1539,80 +1578,40 @@ def _set_result_type(result: object, output_type: LocalSpmdType) -> None:
             _apply(item)
 
 
-def _apply_fixed_args(  # noqa: C901
+def _validate_nonlinear_args(
     func: Callable,
     args: tuple,
-    kwargs: dict,
     spec: _OpSpec,
-    input_types_list: list[LocalSpmdType],
-) -> list[LocalSpmdType]:
-    """Filter fixed_args for LINEAR ops when Partial is present.
+) -> None:
+    """Validate that operands entering the op nonlinearly are not Partial.
 
-    ``fixed_args`` lists positional arg indices that must be held fixed (not P)
-    for the op to be linear in the remaining args.  For example, ``div(a, b)``
-    is linear in ``a`` when ``b`` is fixed, so ``fixed_args=(1,)``.
-
-    When P is present among the non-fixed tensor args:
-    1. Validate that tensor args at fixed_args positions don't have P on any axis.
-    2. Exclude their types from the returned list so LINEAR inference sees only
-       the "free" args (and doesn't reject P + R mixing).
-
-    When no P is present in the free args, return the original list unchanged
-    so normal inference rules apply (e.g., R + V -> V).
-
-    Args:
-        func: The torch function being called.
-        args: Positional arguments to the torch operation.
-        kwargs: Keyword arguments to the torch operation.
-        spec: The op specification (must have non-empty fixed_args).
-        input_types_list: The already-collected input types list.
+    Division is the current user: ``x / y`` is linear (scaling) in ``x`` only,
+    since ``1/y`` is nonlinear in ``y``. Nonlinear operands may be untyped
+    Python scalars or typed non-Partial values, but they cannot be P.
     """
-    # Identify which input_types_list entries came from fixed_args positions.
-    # We re-walk args to figure out which types are "fixed" vs "free".
-    fixed_positions = set(spec.fixed_args)
-    free_types: list[LocalSpmdType] = []
-    fixed_types: list[LocalSpmdType] = []
 
-    for i in spec.tensor_args:
-        if i < len(args):
-            val = args[i]
-            if isinstance(val, torch.Tensor):
-                if i in fixed_positions:
-                    fixed_types.append(get_local_type(val))
-                else:
-                    free_types.append(get_local_type(val))
-            elif isinstance(val, (list, tuple)):
-                for item in val:
-                    if isinstance(item, torch.Tensor):
-                        if i in fixed_positions:
-                            fixed_types.append(get_local_type(item))
-                        else:
-                            free_types.append(get_local_type(item))
-
-    # Check if P is present in any free arg on any axis
-    has_p_in_free = any(P in typ.values() for typ in free_types)
-    # Also check default V (missing from dict means V, not P) -- V != P, so fine.
-
-    if not has_p_in_free:
-        # No P in free args -- normal inference, include all types.
-        return input_types_list
-
-    # P is present in free args -- validate fixed args don't have P
-    for fixed_type in fixed_types:
-        for axis, typ in fixed_type.items():
-            if typ is P:
+    def _check_type(typ: LocalSpmdType) -> None:
+        for axis, axis_type in typ.items():
+            if axis_type is P:
                 raise SpmdTypeError(
-                    f"{func.__name__}: Partial type in fixed argument "
-                    f"(denominator/divisor) on axis {format_axis(axis)} is not allowed. "
-                    f"Division is only linear in the numerator."
+                    f"{func.__name__}: Partial type in nonlinear argument "
+                    f"on axis {format_axis(axis)} is not allowed. Reduce or "
+                    f"convert the Partial operand before using it in a "
+                    f"nonlinear position."
                 )
 
-    # Exclude fixed_types from input_types_list: return only free_types
-    # plus any scalar types that were appended by _collect_scalar_types.
-    # scalar_types count = len(input_types_list) - len(free_types) - len(fixed_types)
-    n_tensor_types = len(free_types) + len(fixed_types)
-    scalar_types = input_types_list[n_tensor_types:]
-    return free_types + scalar_types
+    def _check_value(val: object) -> None:
+        if isinstance(val, torch.Tensor):
+            _check_type(get_local_type(val))
+        elif isinstance(val, Scalar):
+            _check_type(get_local_type(val))
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                _check_value(item)
+
+    for i in spec.nonlinear_args:
+        if i < len(args):
+            _check_value(args[i])
 
 
 # Every function in this registry must accept (x: Tensor, axis, *, src=..., dst=...)
@@ -2907,10 +2906,8 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     linearity = (
                         spec.linearity if spec is not None else OpLinearity.NONLINEAR
                     )
-                    if spec is not None and spec.fixed_args:
-                        input_types_list = _apply_fixed_args(
-                            func, args, kwargs, spec, input_types_list
-                        )
+                    if spec is not None and spec.nonlinear_args:
+                        _validate_nonlinear_args(func, original_args, spec)
                     # NB: output_type may be further updated because global
                     # shard propagation below may promote local type V to P.
                     output_type = infer_output_type(

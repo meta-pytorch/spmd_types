@@ -46,6 +46,7 @@ from spmd_types._checker import (
 from spmd_types._collectives import all_reduce
 from spmd_types._mesh import _pg_for_axis
 from spmd_types._mesh_axis import MeshAxis
+from spmd_types._scalar_sentinel import _Scalar
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type, get_local_type
 from spmd_types.types import normalize_axis, PartitionSpec, SpmdType, SpmdTypeError
@@ -198,6 +199,50 @@ class TestLinearTypePropagation(SpmdTypeCheckedTestCase):
         x = self._generate_inputs((4,), self.pg, P)
         result = torch.mul(x, 2.0)
         self.assertIs(get_axis_local_type(result, self.pg), P)
+
+    def test_truediv_p_scalar_allowed(self):
+        """P / scalar should preserve P."""
+        x = self._generate_inputs((4,), self.pg, P)
+        result = x / 2.0
+        self.assertIs(get_axis_local_type(result, self.pg), P)
+
+    def test_rtruediv_p_scalar_rejected(self):
+        """scalar / P should be rejected because P is in the denominator."""
+        x = self._generate_inputs((4,), self.pg, P)
+        with self.assertRaises(SpmdTypeError):
+            2.0 / x
+
+    def test_truediv_p_denominator_rejected(self):
+        """P in a denominator is rejected."""
+        x = self._generate_inputs((4,), self.pg, R)
+        y = self._generate_inputs((4,), self.pg, P)
+
+        with self.assertRaises(SpmdTypeError):
+            x / y
+
+    def test_mul_p_typed_scalar(self):
+        """P * Scalar(R) preserves P; other typed Scalars are not valid scaling."""
+        x = self._generate_inputs((4,), self.pg, P)
+
+        result = x * Scalar(2.0, {self.pg: R})
+        self.assertIs(get_axis_local_type(result, self.pg), P)
+
+        for scalar_type in (I, V, P):
+            with self.subTest(scalar_type=scalar_type):
+                with self.assertRaises(SpmdTypeError):
+                    x * Scalar(2.0, {self.pg: scalar_type})
+
+    def test_truediv_p_typed_scalar(self):
+        """P / Scalar(R) preserves P; typed nonlinear denominators are rejected."""
+        x = self._generate_inputs((4,), self.pg, P)
+
+        result = x / Scalar(2.0, {self.pg: R})
+        self.assertIs(get_axis_local_type(result, self.pg), P)
+
+        for scalar_type in (I, V, P):
+            with self.subTest(scalar_type=scalar_type):
+                with self.assertRaises(SpmdTypeError):
+                    x / Scalar(2.0, {self.pg: scalar_type})
 
     def test_div_i_scalar_gives_i(self):
         """I / scalar should give I (scalar adopts I type)."""
@@ -870,6 +915,13 @@ class TestOpLinearity(LocalTensorTestCase):
         """MULTILINEAR with P and R should return P."""
         result = infer_local_type_for_axis(
             self.pg, [P, R], linearity=OpLinearity.MULTILINEAR
+        )
+        self.assertIs(result, P)
+
+    def test_multilinear_p_scalar_gives_p(self):
+        """MULTILINEAR with P and scalar should return P (scaling preserves P)."""
+        result = infer_local_type_for_axis(
+            self.pg, [P, _Scalar], linearity=OpLinearity.MULTILINEAR
         )
         self.assertIs(result, P)
 
