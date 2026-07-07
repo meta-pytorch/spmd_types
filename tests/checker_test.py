@@ -44,6 +44,7 @@ from spmd_types._checker import (
     typecheck,
 )
 from spmd_types._collectives import all_reduce
+from spmd_types._mesh import _pg_for_axis
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type, get_local_type
@@ -1096,6 +1097,41 @@ class TestSpmdType(LocalTensorTestCase):
 
         with self.assertRaises(SpmdTypeError):
             assert_type(torch.randn(4, 3), spmd_type)
+
+
+class TestPgForAxis(LocalTensorTestCase, expecttest.TestCase):
+    """Test _pg_for_axis resolves axes to process groups."""
+
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+
+    def test_resolves_name_meshaxis_and_pg(self):
+        dp_pg = self.mesh.get_group("dp")
+        with set_current_mesh(self.mesh):
+            self.assertIs(_pg_for_axis("dp"), dp_pg)
+            self.assertIs(_pg_for_axis(MeshAxis.of(dp_pg)), dp_pg)
+            self.assertIs(_pg_for_axis(dp_pg), dp_pg)
+
+    def test_rejects_axis_not_in_mesh(self):
+        with set_current_mesh(self.mesh):
+            with self.assertRaises(RuntimeError) as cm:
+                _pg_for_axis("ep")
+        self.assertExpectedInline(
+            str(cm.exception),
+            """Axis 'ep' is not in the current mesh.""",
+        )
+
+    def test_requires_active_mesh_with_groups(self):
+        with self.assertRaises(RuntimeError) as cm:
+            _pg_for_axis("dp")
+        self.assertExpectedInline(
+            str(cm.exception),
+            """Passing an axis name to a redistribution or collective API requires an ambient DeviceMesh. Wrap the call in set_current_mesh(device_mesh), or pass a ProcessGroup directly.""",
+        )
 
 
 class TestOpLinearityRegistry(SpmdTypeCheckedTestCase):

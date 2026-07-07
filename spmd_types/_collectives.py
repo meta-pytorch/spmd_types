@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, TYPE_CHECKING
+from typing import List, Optional
 
 import torch
 from spmd_types import _dist
@@ -18,12 +18,19 @@ from spmd_types._dtype_utils import (
     _process_dtype_options,
 )
 from spmd_types._local import convert, reinterpret
+from spmd_types._mesh import _pg_for_axis
 from spmd_types._traceback import api_boundary
-from spmd_types.types import _canonicalize_shard, I, P, PerMeshAxisSpmdType, R, Shard, V
+from spmd_types.types import (
+    _canonicalize_shard,
+    DeviceMeshAxis,
+    I,
+    P,
+    PerMeshAxisSpmdType,
+    R,
+    Shard,
+    V,
+)
 from torch.overrides import handle_torch_function, has_torch_function_unary
-
-if TYPE_CHECKING:
-    from torch.distributed import ProcessGroup
 
 # =============================================================================
 # all_reduce: P -> R | I
@@ -93,7 +100,7 @@ class _AllReduce(torch.autograd.Function):
 @api_boundary
 def all_reduce(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType = P,
     dst: PerMeshAxisSpmdType,
@@ -169,12 +176,13 @@ def all_reduce(
     common case), this role is filled by ``reduce_scatter(): P->V``
     instead.
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             all_reduce,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             inplace=inplace,
@@ -184,7 +192,7 @@ def all_reduce(
         )
     if src is not P:
         if src is V:
-            x = reinterpret(x, axis, src=V, dst=P)
+            x = reinterpret(x, pg, src=V, dst=P)
         elif src is R or src is I:
             raise ValueError(
                 f"all_reduce src must be P, got {src}. "
@@ -204,7 +212,7 @@ def all_reduce(
             requires_grad=x.requires_grad,
             inplace=inplace,
         )
-        return _AllReduce.apply(x, axis, dst, inplace, dtype_options)
+        return _AllReduce.apply(x, pg, dst, inplace, dtype_options)
     else:
         raise ValueError(f"all_reduce dst must be R or I, got {dst}")
 
@@ -387,7 +395,7 @@ class _AllGatherUneven(torch.autograd.Function):
 @api_boundary
 def all_gather(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType = V,
     dst: PerMeshAxisSpmdType,
@@ -510,12 +518,13 @@ def all_gather(
     welcome to write your own custom collective and give it the same type as
     ``spmd.all_gather``.
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             all_gather,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             gather_dim=gather_dim,
@@ -560,16 +569,16 @@ def all_gather(
         if split_sizes is not None:
             return _AllGatherUneven.apply(
                 x,
-                axis,
+                pg,
                 dst,
                 gather_dim,
                 split_sizes,
                 dtype_options,
             )
         elif stack:
-            return _AllGatherStack.apply(x, axis, dst, gather_dim, dtype_options)
+            return _AllGatherStack.apply(x, pg, dst, gather_dim, dtype_options)
         else:
-            return _AllGatherShard.apply(x, axis, dst, gather_dim, dtype_options)
+            return _AllGatherShard.apply(x, pg, dst, gather_dim, dtype_options)
     else:
         raise ValueError(f"all_gather dst must be R or I, got {dst}")
 
@@ -698,7 +707,7 @@ class _ReduceScatterUneven(torch.autograd.Function):
 @api_boundary
 def reduce_scatter(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType = P,
     dst: PerMeshAxisSpmdType = V,
@@ -774,12 +783,13 @@ def reduce_scatter(
     It is common to want to reduce-scatter on varying data; just
     ``reinterpret(V,P)`` the data as partial before calling ``reduce_scatter``.
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             reduce_scatter,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             scatter_dim=scatter_dim,
@@ -793,7 +803,7 @@ def reduce_scatter(
 
     if src is not P:
         if src is V:
-            x = reinterpret(x, axis, src=V, dst=P)
+            x = reinterpret(x, pg, src=V, dst=P)
         elif src is R or src is I:
             raise ValueError(
                 f"reduce_scatter src must be P, got {src}. "
@@ -832,17 +842,17 @@ def reduce_scatter(
     )
 
     if dst is V:
-        return _ReduceScatterStack.apply(x, axis, scatter_dim, dtype_options)
+        return _ReduceScatterStack.apply(x, pg, scatter_dim, dtype_options)
     elif split_sizes is not None:
         return _ReduceScatterUneven.apply(
             x,
-            axis,
+            pg,
             scatter_dim,
             split_sizes,
             dtype_options,
         )
     else:
-        return _ReduceScatterShard.apply(x, axis, scatter_dim, dtype_options)
+        return _ReduceScatterShard.apply(x, pg, scatter_dim, dtype_options)
 
 
 # =============================================================================
@@ -971,7 +981,7 @@ class _AllToAllShard(torch.autograd.Function):
 @api_boundary
 def all_to_all(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType = V,
     dst: PerMeshAxisSpmdType = V,
@@ -1059,12 +1069,13 @@ def all_to_all(
     ``all_to_all(S(i),S(j)): S(i) -> S(j)``, the backwards is
     ``all_to_all(S(j),S(i)): S(j) -> S(i)``.
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             all_to_all,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             split_dim=split_dim,
@@ -1142,15 +1153,15 @@ def all_to_all(
             )
         return _AllToAllUneven.apply(
             x,
-            axis,
+            pg,
             output_split_sizes,
             input_split_sizes,
             dtype_options,
         )
     elif src is V and dst is V:
-        return _AllToAllStack.apply(x, axis, split_dim, concat_dim, dtype_options)
+        return _AllToAllStack.apply(x, pg, split_dim, concat_dim, dtype_options)
     else:
-        return _AllToAllShard.apply(x, axis, split_dim, concat_dim, dtype_options)
+        return _AllToAllShard.apply(x, pg, split_dim, concat_dim, dtype_options)
 
 
 # =============================================================================
@@ -1161,7 +1172,7 @@ def all_to_all(
 @api_boundary
 def redistribute(  # noqa: C901
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
@@ -1383,7 +1394,7 @@ def redistribute(  # noqa: C901
 
 def unshard(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,

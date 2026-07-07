@@ -32,6 +32,7 @@ class MeshEntry(NamedTuple):
     axes: frozenset[MeshAxis]
     names: dict[str, MeshAxis]
     all_names: dict[str, MeshAxis]
+    pgs: dict[MeshAxis, ProcessGroup]
 
 
 _tls = threading.local()
@@ -102,19 +103,45 @@ def current_mesh_all_names() -> dict[str, MeshAxis] | None:
     return None
 
 
+def _axes_to_pgs(
+    axes: (
+        frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup] | dict[str, MeshAxis]
+    ),
+) -> dict[MeshAxis, ProcessGroup]:
+    """Capture the MeshAxis-to-ProcessGroup mapping for mesh inputs that carry PGs.
+
+    Only a ``DeviceMesh`` currently populates this map; the other input forms
+    (frozenset/dict of ``MeshAxis``) carry no retrievable PGs, so an empty
+    mapping is returned.
+    """
+    from spmd_types._mesh_axis import MeshAxis
+    from torch.distributed.device_mesh import DeviceMesh
+
+    if isinstance(axes, DeviceMesh) and axes.mesh_dim_names:
+        return {
+            MeshAxis.of(g): g
+            for name in axes.mesh_dim_names
+            for g in (axes.get_group(name),)
+        }
+    return {}
+
+
 def _push_mesh(
     mesh: frozenset[MeshAxis]
     | DeviceMesh
     | Sequence[ProcessGroup]
     | dict[str, MeshAxis],
     names: dict[str, MeshAxis] | None = None,
+    pgs: dict[MeshAxis, ProcessGroup] | None = None,
 ) -> None:
     if isinstance(mesh, frozenset):
         resolved, resolved_names = mesh, names if names is not None else {}
+        resolved_pgs = pgs if pgs is not None else {}
     else:
         from spmd_types._mesh import _resolve_axes
 
         resolved, resolved_names = _resolve_axes(mesh)
+        resolved_pgs = pgs if pgs is not None else _axes_to_pgs(mesh)
     assert all(ax.size() > 1 for ax in resolved), (
         f"mesh must not contain size-1 axes, got {resolved}"
     )
@@ -122,7 +149,7 @@ def _push_mesh(
     filtered_names = {k: v for k, v in resolved_names.items() if v in resolved}
     if not hasattr(_tls, "mesh_stack"):
         _tls.mesh_stack = []
-    _tls.mesh_stack.append(MeshEntry(resolved, filtered_names, all_names))
+    _tls.mesh_stack.append(MeshEntry(resolved, filtered_names, all_names, resolved_pgs))
 
 
 def _pop_mesh() -> MeshEntry:

@@ -12,11 +12,30 @@ Covers: _local.py
 
 import unittest
 
+import expecttest
 import torch
-from spmd_types import convert, I, P, R, reinterpret, S, V
+from spmd_types import (
+    all_gather,
+    all_reduce,
+    all_to_all,
+    convert,
+    I,
+    invariant_to_replicate,
+    P,
+    R,
+    redistribute,
+    reduce_scatter,
+    reinterpret,
+    S,
+    set_current_mesh,
+    shard,
+    unshard,
+    V,
+)
 from spmd_types._checker import assert_type, typecheck
 from spmd_types._test_utils import LocalTensorTestCase
 from spmd_types._type_attr import get_axis_local_type
+from torch.distributed.device_mesh import init_device_mesh
 
 
 class TestReinterpret(LocalTensorTestCase):
@@ -409,6 +428,78 @@ class TestConvertSubmesh(LocalTensorTestCase):
         )
         # Ranks 0 and 1 are in different dp groups, same position -> same chunk
         torch.testing.assert_close(result._local_tensors[0], result._local_tensors[1])
+
+
+class TestAxisNameResolution(LocalTensorTestCase, expecttest.TestCase):
+    """PG-accepting ops accept an axis name resolved via the current mesh."""
+
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Single axis spanning the whole world so every collective runs over
+        # the full group; multi-axis name resolution is covered by
+        # TestPgForAxis.
+        cls.mesh = init_device_mesh("cpu", (cls.WORLD_SIZE,), mesh_dim_names=("tp",))
+
+    def _assert_name_matches_pg(self, op, in_type, **kwargs):
+        """Passing axis name "tp" yields the same result as passing the PG."""
+        tp = self.mesh.get_group("tp")
+        x = self._generate_inputs((6, 4), tp, in_type)
+        with typecheck():
+            out_pg = op(x, tp, **kwargs)
+        with typecheck(), set_current_mesh(self.mesh):
+            out_name = op(x, "tp", **kwargs)
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(
+                out_name._local_tensors[r], out_pg._local_tensors[r]
+            )
+        self.assertEqual(
+            get_axis_local_type(out_name, tp), get_axis_local_type(out_pg, tp)
+        )
+
+    def test_convert(self):
+        self._assert_name_matches_pg(convert, R, src=R, dst=S(0))
+
+    def test_reinterpret(self):
+        self._assert_name_matches_pg(reinterpret, R, src=R, dst=V, expert_mode=True)
+
+    def test_shard(self):
+        self._assert_name_matches_pg(shard, R, src=R, dst=S(0))
+
+    def test_invariant_to_replicate(self):
+        self._assert_name_matches_pg(invariant_to_replicate, I)
+
+    def test_all_reduce(self):
+        self._assert_name_matches_pg(all_reduce, P, src=P, dst=R)
+
+    def test_all_gather(self):
+        self._assert_name_matches_pg(all_gather, V, src=V, dst=R)
+
+    def test_reduce_scatter(self):
+        self._assert_name_matches_pg(reduce_scatter, P, src=P, dst=V, scatter_dim=0)
+
+    def test_all_to_all(self):
+        self._assert_name_matches_pg(
+            all_to_all, V, src=V, dst=V, split_dim=0, concat_dim=0
+        )
+
+    def test_redistribute(self):
+        self._assert_name_matches_pg(redistribute, V, src=V, dst=R)
+
+    def test_unshard(self):
+        self._assert_name_matches_pg(unshard, S(0), src=S(0), dst=R)
+
+    def test_axis_name_requires_current_mesh(self):
+        tp = self.mesh.get_group("tp")
+        x = self._generate_inputs((6, 4), tp, R)
+        with self.assertRaises(RuntimeError) as cm:
+            convert(x, "tp", src=R, dst=S(0))
+        self.assertExpectedInline(
+            str(cm.exception),
+            """Passing an axis name to a redistribution or collective API requires an ambient DeviceMesh. Wrap the call in set_current_mesh(device_mesh), or pass a ProcessGroup directly.""",
+        )
 
 
 if __name__ == "__main__":

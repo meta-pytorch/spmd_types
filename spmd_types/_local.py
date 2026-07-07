@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 from spmd_types import _dist
 from spmd_types._dtype_utils import (
@@ -18,8 +16,18 @@ from spmd_types._dtype_utils import (
     _process_dtype_options,
     _split_composition_dtype_options,
 )
+from spmd_types._mesh import _pg_for_axis
 from spmd_types._traceback import api_boundary
-from spmd_types.types import _canonicalize_shard, I, P, PerMeshAxisSpmdType, R, Shard, V
+from spmd_types.types import (
+    _canonicalize_shard,
+    DeviceMeshAxis,
+    I,
+    P,
+    PerMeshAxisSpmdType,
+    R,
+    Shard,
+    V,
+)
 
 try:
     from torch.distributed._local_tensor import local_tensor_mode, LocalTensor
@@ -30,9 +38,6 @@ except ImportError:
     _HAS_LOCAL_TENSOR = False
 
 from torch.overrides import handle_torch_function, has_torch_function_unary
-
-if TYPE_CHECKING:
-    from torch.distributed import ProcessGroup
 
 
 def _get_local_tensor_mode(x: torch.Tensor):
@@ -196,7 +201,7 @@ class _ReplicateToPartial(torch.autograd.Function):
 @api_boundary
 def reinterpret(  # noqa: C901
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
@@ -304,12 +309,13 @@ def reinterpret(  # noqa: C901
             V      - X
             P        -
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             reinterpret,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             expert_mode=expert_mode,
@@ -359,7 +365,7 @@ def reinterpret(  # noqa: C901
     if src is R and dst is I:
         return convert(
             x,
-            axis,
+            pg,
             src=R,
             dst=I,
             expert_mode=True,
@@ -370,7 +376,7 @@ def reinterpret(  # noqa: C901
     if src is I and dst is R:
         return convert(
             x,
-            axis,
+            pg,
             src=I,
             dst=R,
             op_dtype=op_dtype,
@@ -390,27 +396,27 @@ def reinterpret(  # noqa: C901
     )
 
     if src is R and dst is V:
-        return _ReplicateToVarying.apply(x, axis, dtype_options)
+        return _ReplicateToVarying.apply(x, pg, dtype_options)
     elif src is R and dst is P:
-        return _ReplicateToPartial.apply(x, axis, dtype_options)
+        return _ReplicateToPartial.apply(x, pg, dtype_options)
     elif src is I and dst is V:
         # Composition: I -> R -> V
         first_opts, second_opts = _split_composition_dtype_options(dtype_options)
         return _ReplicateToVarying.apply(
-            _InvariantToReplicate.apply(x, axis, first_opts),
-            axis,
+            _InvariantToReplicate.apply(x, pg, first_opts),
+            pg,
             second_opts,
         )
     elif src is I and dst is P:
         # Composition: I -> R -> P
         first_opts, second_opts = _split_composition_dtype_options(dtype_options)
         return _ReplicateToPartial.apply(
-            _InvariantToReplicate.apply(x, axis, first_opts),
-            axis,
+            _InvariantToReplicate.apply(x, pg, first_opts),
+            pg,
             second_opts,
         )
     elif src is V and dst is P:
-        return _VaryingToPartial.apply(x, axis, dtype_options)
+        return _VaryingToPartial.apply(x, pg, dtype_options)
     else:
         if src is P:
             raise ValueError(
@@ -721,7 +727,7 @@ class _ConvertVaryingToPartial(torch.autograd.Function):
 @api_boundary
 def convert(  # noqa: C901
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
@@ -1002,12 +1008,13 @@ def convert(  # noqa: C901
             V      - O
             P        -
     """
+    pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
         return handle_torch_function(
             convert,
             (x,),
             x,
-            axis,
+            pg,
             src=src,
             dst=dst,
             expert_mode=expert_mode,
@@ -1075,23 +1082,23 @@ def convert(  # noqa: C901
 
     if src_base is R and dst_base is V:
         stack = not isinstance(dst, Shard)
-        return _ConvertReplicateToVarying.apply(x, axis, dim, stack, dtype_options)
+        return _ConvertReplicateToVarying.apply(x, pg, dim, stack, dtype_options)
     elif src_base is R and dst_base is P:
-        return _ConvertReplicateToPartial.apply(x, axis, dtype_options)
+        return _ConvertReplicateToPartial.apply(x, pg, dtype_options)
     elif src_base is R and dst_base is I:
         # Same as reinterpret
-        return _ReplicateToInvariant.apply(x, axis, dtype_options)
+        return _ReplicateToInvariant.apply(x, pg, dtype_options)
     elif src_base is I and dst_base is V:
         stack = not isinstance(dst, Shard)
-        return _ConvertInvariantToVarying.apply(x, axis, dim, stack, dtype_options)
+        return _ConvertInvariantToVarying.apply(x, pg, dim, stack, dtype_options)
     elif src_base is I and dst_base is P:
-        return _ConvertInvariantToPartial.apply(x, axis, dtype_options)
+        return _ConvertInvariantToPartial.apply(x, pg, dtype_options)
     elif src_base is I and dst_base is R:
         # Same as reinterpret
-        return _InvariantToReplicate.apply(x, axis, dtype_options)
+        return _InvariantToReplicate.apply(x, pg, dtype_options)
     elif src_base is V and dst_base is P:
         stack = not isinstance(src, Shard)
-        return _ConvertVaryingToPartial.apply(x, axis, dim, stack, dtype_options)
+        return _ConvertVaryingToPartial.apply(x, pg, dim, stack, dtype_options)
     else:
         if src_base is P:
             if dst_base is R or dst_base is I:
@@ -1114,7 +1121,7 @@ def convert(  # noqa: C901
 
 def shard(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
@@ -1151,7 +1158,7 @@ def shard(
 
 def invariant_to_replicate(
     x,
-    axis: ProcessGroup,
+    axis: DeviceMeshAxis,
     *,
     op_dtype: torch.dtype | None = None,
     out_dtype: torch.dtype | None = None,

@@ -13,8 +13,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from spmd_types._mesh_axis import MeshAxis
-from spmd_types._state import _pop_mesh, _push_mesh
-from spmd_types.types import normalize_mesh
+from spmd_types._state import _axes_to_pgs, _pop_mesh, _push_mesh
+from spmd_types.types import DeviceMeshAxis, normalize_mesh
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
@@ -43,11 +43,42 @@ def set_current_mesh(
     (``current_mesh_all_names``).
     """
     resolved, names = _resolve_axes(axes)
-    _push_mesh(resolved, names)
+    _push_mesh(resolved, names, _axes_to_pgs(axes))
     try:
         yield
     finally:
         _pop_mesh()
+
+
+def _pg_for_axis(axis: DeviceMeshAxis) -> ProcessGroup:
+    """Resolve a mesh axis to its ``ProcessGroup`` using the current mesh.
+
+    Accepts a ``ProcessGroup`` (returned unchanged), an axis name, or a
+    ``MeshAxis``. Raises ``RuntimeError`` if no current mesh carries process
+    groups, or if the axis is not part of it.
+    """
+    from spmd_types._state import _tls, current_mesh_all_names
+    from torch.distributed import ProcessGroup
+
+    if isinstance(axis, ProcessGroup):
+        return axis
+
+    stack = getattr(_tls, "mesh_stack", None)
+    pgs = stack[-1].pgs if stack else None
+    if not pgs:
+        raise RuntimeError(
+            "Passing an axis name to a redistribution or collective "
+            "API requires an ambient DeviceMesh. Wrap the call in "
+            "set_current_mesh(device_mesh), or pass a ProcessGroup directly."
+        )
+
+    if isinstance(axis, str):
+        resolved = (current_mesh_all_names() or {}).get(axis)
+    else:
+        resolved = axis
+    if resolved is None or resolved not in pgs:
+        raise RuntimeError(f"Axis {axis!r} is not in the current mesh.")
+    return pgs[resolved]
 
 
 def _resolve_axes(
