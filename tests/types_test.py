@@ -253,7 +253,7 @@ class TestPartitionSpecToShardTypes(_NamedMeshAxisTestCase):
             partition_spec_to_shard_types(PartitionSpec(self.tp, self.tp))
         self.assertExpectedInline(
             str(ctx.exception),
-            """Mesh axes tp and tp are not orthogonal (they share ranks). All axes in a LocalSpmdType must be mutually orthogonal.""",
+            """Mesh axes tp and tp are not orthogonal (their layouts are not independent radix dimensions). All axes in a LocalSpmdType must be mutually orthogonal.""",
         )
 
     def test_round_trip_single_axis_per_dim(self):

@@ -2350,9 +2350,9 @@ class TestOrthogonalityValidation(LocalTensorTestCase):
     """Test that _validate() rejects non-orthogonal mesh axes.
 
     The core invariant: all mesh axes in a tensor's LocalSpmdType dict must be
-    mutually orthogonal (they tile different dimensions of the mesh without
-    rank collisions). Overlapping axes produce incorrect type inference results
-    because type inference reasons about each axis independently.
+    mutually orthogonal independent mesh dimensions. Overlapping axes and
+    arbitrary non-radix layouts produce incorrect type inference results because
+    type inference reasons about each axis independently.
     """
 
     WORLD_SIZE = 8
@@ -2364,7 +2364,7 @@ class TestOrthogonalityValidation(LocalTensorTestCase):
 
         # Orthogonal axes: dp (size=2, stride=4) and tp (size=4, stride=1)
         # dp generates ranks {0, 4}, tp generates ranks {0, 1, 2, 3}
-        # Combined: 2*4 = 8 unique ranks -- orthogonal.
+        # Combined: stride 4 starts past the 0..3 span -- orthogonal.
         cls.dp = MeshAxis.of(2, 4)
         cls.tp = MeshAxis.of(4, 1)
 
@@ -2430,7 +2430,7 @@ class TestOrthogonalityValidation(LocalTensorTestCase):
         msg = str(ctx.exception)
         # The message should mention both axes.
         self.assertIn("not orthogonal", msg)
-        self.assertIn("share ranks", msg)
+        self.assertIn("independent radix dimensions", msg)
 
     def test_mutate_type_does_not_add_nonorthogonal_axes(self):
         """mutate_type changes values, so it still validates the full dict."""

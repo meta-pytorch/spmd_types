@@ -493,35 +493,35 @@ def normalize_axis(axis: DeviceMeshAxis) -> MeshAxis:
 def _check_orthogonality(axes: list[MeshAxis]) -> None:
     """Check that all mesh axes are mutually orthogonal.
 
-    Axes must tile different dimensions of the device mesh without rank
-    collisions. Overlapping axes (e.g., a flattened ``dp_cp`` axis alongside
-    an individual ``dp`` axis) produce incorrect type inference results because
-    type inference reasons about each axis independently.
+    Axes must tile independent radix dimensions of the device mesh. Overlapping
+    axes (e.g., a flattened ``dp_cp`` axis alongside an individual ``dp`` axis)
+    and arbitrary non-radix layouts produce incorrect type inference results
+    because type inference reasons about each axis independently.
 
     Args:
         axes: The mesh axes to check.
 
     Raises:
-        SpmdTypeError: If any two axes overlap (share ranks).
+        SpmdTypeError: If the axes are not independent mesh dimensions.
     """
     if len(axes) < 2:
         return  # 0 or 1 axes are trivially orthogonal.
     # Fast path: check all axes at once.
     if axes[0].isorthogonal(*axes[1:]):
         return
-    # Slow path: find the specific overlapping pair for a clear error message.
+    # Slow path: find a specific conflicting pair for a clear error message.
     for i in range(len(axes)):
         for j in range(i + 1, len(axes)):
             if not axes[i].isorthogonal(axes[j]):
                 raise SpmdTypeError(
                     f"Mesh axes {format_axis(axes[i])} and "
-                    f"{format_axis(axes[j])} are not orthogonal (they share "
-                    f"ranks). All axes in a LocalSpmdType must be mutually "
+                    f"{format_axis(axes[j])} are not orthogonal (their layouts "
+                    f"are not independent radix dimensions). All axes in a "
+                    f"LocalSpmdType must be mutually "
                     f"orthogonal."
                 )
-    # If no pair is non-orthogonal but the group fails, it means a three-way
-    # collision. This shouldn't happen with standard mesh layouts but handle
-    # it for completeness.
+    # Pairs can be radix-separable even when the full group is not; for example
+    # strides 5, 6, and 7 are pairwise separable but not jointly separable.
     axis_names = ", ".join(format_axis(a) for a in axes)
     raise SpmdTypeError(f"Mesh axes [{axis_names}] are not mutually orthogonal.")
 
@@ -533,13 +533,13 @@ def normalize_mesh(axes: frozenset[MeshAxis]) -> frozenset[MeshAxis]:
 
     1. Size-1 (singleton) axes are dropped -- they carry no sharding
        information and keeping them causes spurious strict-mode errors.
-    2. Remaining axes are mutually orthogonal (no shared ranks).
+    2. Remaining axes are mutually orthogonal independent mesh dimensions.
 
     Args:
         axes: The mesh axes to normalize.
 
     Raises:
-        SpmdTypeError: If any two (non-singleton) axes overlap.
+        SpmdTypeError: If the axes are not independent mesh dimensions.
     """
     filtered = frozenset(a for a in axes if a.size() > 1)
     _check_orthogonality(list(filtered))
@@ -557,7 +557,7 @@ def normalize_local_type(spmd_type: LocalSpmdType) -> LocalSpmdType:
     3. Size-1 (singleton) axes are dropped -- they carry no information since
        there is only one rank, and dropping them keeps the key set consistent
        across tensors and ``Scalar`` objects.
-    4. Remaining axes are mutually orthogonal (no shared ranks).
+    4. Remaining axes are mutually orthogonal independent mesh dimensions.
 
     Higher-level validators (e.g., ``_validate`` in ``_checker.py``) may add
     further checks (rejection of internal sentinel types) on top of this
@@ -568,7 +568,7 @@ def normalize_local_type(spmd_type: LocalSpmdType) -> LocalSpmdType:
 
     Raises:
         TypeError: If any value is not a PerMeshAxisLocalSpmdType.
-        SpmdTypeError: If any two axes overlap (share ranks).
+        SpmdTypeError: If the axes are not independent mesh dimensions.
     """
     result: LocalSpmdType = {}
     for axis, typ in spmd_type.items():

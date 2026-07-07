@@ -863,8 +863,10 @@ with set_current_mesh(frozenset({tp, dp})):
 The mesh stack is thread-local and supports nesting: an inner
 `set_current_mesh` overrides the outer one and restores it on exit.
 
-The axes in a `set_current_mesh` call must be mutually orthogonal (no shared
-ranks), enforced at entry.
+The axes in a `set_current_mesh` call must be mutually orthogonal independent
+mesh dimensions, enforced at entry. `MeshAxis` can compactly represent more
+general shape/stride rank patterns, but those arbitrary layouts are rejected
+when they are not radix-separable.
 
 #### Why not DeviceMesh?
 
