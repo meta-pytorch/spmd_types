@@ -589,20 +589,49 @@ def assert_local_type_like(
 # =============================================================================
 
 
-@api_boundary
-def mutate_type(
-    tensor: torch.Tensor,
+def _mutate_type_single_axis(
+    local_type: LocalSpmdType,
     axis: DeviceMeshAxis,
     *,
     src: PerMeshAxisSpmdType,
     dst: PerMeshAxisSpmdType,
+) -> LocalSpmdType:
+    axis = normalize_axis(axis)
+    if axis.size() == 1:
+        return local_type
+    if axis not in local_type:
+        raise SpmdTypeError(
+            f"mutate_type: axis {format_axis(axis)} not found in tensor's "
+            f"SPMD type. Tensor has axes: {set(local_type.keys())}"
+        )
+
+    src_local = to_local_type(src)
+    current = local_type[axis]
+    if current is not src_local:
+        raise SpmdTypeError(
+            f"mutate_type: expected current type {src_local} on axis "
+            f"{format_axis(axis)}, got {current}"
+        )
+
+    new_type = dict(local_type)
+    new_type[axis] = to_local_type(dst)
+    return new_type
+
+
+@api_boundary
+def mutate_type(
+    tensor: torch.Tensor,
+    axis: DeviceMeshAxis | None = None,
+    *,
+    src: PerMeshAxisSpmdType | dict[DeviceMeshAxis, PerMeshAxisSpmdType],
+    dst: PerMeshAxisSpmdType | dict[DeviceMeshAxis, PerMeshAxisSpmdType],
 ) -> torch.Tensor:
-    """Change the SPMD type of a single mesh axis on an already-annotated tensor.
+    """Change the SPMD type of mesh axes on an already-annotated tensor.
 
     Unlike ``assert_type``, this function *overwrites* the existing type on
-    ``axis``.  The caller must specify the expected current type (``src``) to
-    prevent silent corruption; a ``SpmdTypeError`` is raised if the tensor's
-    current type on ``axis`` does not match ``src``.
+    the updated axes. The caller must specify the expected current type
+    (``src``) to prevent silent corruption; a ``SpmdTypeError`` is raised if
+    an updated axis's current type does not match its expected ``src``.
 
     This is intended for internal use in low-level parallelism primitives
     where a buffer legitimately changes its distribution semantics in place
@@ -613,45 +642,88 @@ def mutate_type(
     *views* into a buffer after an in-place collective has changed the
     buffer's semantics.
 
+    There are four supported call shapes:
+
+    - ``mutate_type(tensor, axis, src=R, dst=I)`` updates a single axis.
+    - ``mutate_type(tensor, src=R, dst=I)`` updates all axes annotated on the
+      tensor, assuming all axes share ``src`` type.
+    - ``mutate_type(tensor, src=R, dst={axis0: I, axis1: P})`` updates every
+      axis in ``dst``, after checking all update axes have ``src`` type.
+      Axes not listed in ``dst`` are unaffected.
+    - ``mutate_type(tensor, src={axis0: R, axis1: I}, dst=P)`` is similarly supported.
+    - ``mutate_type(tensor, src={axis0: R, axis1: R}, dst={axis0: I, axis1: I})``
+      updates each axis correspondingly. ``src`` and ``dst`` keys must match,
+      and other axes are unaffected.
+
+    ``mutate_type`` errors if any specified ``src`` type doesn't match the tensor's
+    annotation.
+
     Args:
         tensor: The tensor whose type to mutate.  Must already have a local
             type annotation.
-        axis: The mesh axis (MeshAxis or ProcessGroup) to modify.
-        src: The expected current type on ``axis``.  Raises if it does not
-            match.  Accepts R, I, V, P, or S(i) (S(i) is compared as V).
-        dst: The new type to set on ``axis``.  Accepts R, I, V, P, or S(i)
-            (S(i) is stored as V).
+        axis: The mesh axis (MeshAxis or ProcessGroup) to modify for the
+            single-axis form. Omit when ``src`` or ``dst`` is a dict mapping
+            axes to types.
+        src: The expected current type, or a dict of per-axis expected current
+            types. Accepts R, I, V, P, or S(i); S(i) is compared as V.
+        dst: The new type, or a dict of per-axis destination types. Accepts R,
+            I, V, P, or S(i); S(i) is stored as V.
 
     Returns:
         The tensor for chaining.
 
     Raises:
-        SpmdTypeError: If the tensor has no type, the axis is missing,
-            or the current type does not match ``src``.
+        SpmdTypeError: If the tensor has no type, if a non-singleton updated
+            axis is missing from the tensor's local type, if a current type
+            does not match ``src``, or if per-axis ``src`` and ``dst`` dict keys
+            differ.
     """
-    axis = normalize_axis(axis)
-    if axis.size() == 1:
-        return tensor  # singleton axes are not tracked
     local_type = get_local_type(tensor)
-    if axis not in local_type:
-        raise SpmdTypeError(
-            f"mutate_type: axis {format_axis(axis)} not found in tensor's "
-            f"SPMD type. Tensor has axes: {set(local_type.keys())}"
-        )
-
-    # Normalize S(i) -> V for comparison and storage
-    src_local = to_local_type(src)
-    dst_local = to_local_type(dst)
-
-    current = local_type[axis]
-    if current is not src_local:
-        raise SpmdTypeError(
-            f"mutate_type: expected current type {src_local} on axis "
-            f"{format_axis(axis)}, got {current}"
+    if isinstance(dst, dict) and isinstance(src, dict):
+        if axis is not None:
+            raise SpmdTypeError(
+                "mutate_type() expected axis to be omitted when src or dst is a dict."
+            )
+        if set(dst) != set(src):
+            axes = ", ".join(format_axis(axis) for axis in set(dst) ^ set(src))
+            raise SpmdTypeError(
+                f"mutate_type() expected src and dst axes to match: {axes}"
+            )
+        updates = [
+            (update_axis, src[update_axis], dst_type)
+            for update_axis, dst_type in dst.items()
+        ]
+    elif isinstance(dst, dict):
+        if axis is not None:
+            raise SpmdTypeError(
+                "mutate_type() expected axis to be omitted when src or dst is a dict."
+            )
+        updates = [
+            (update_axis, src, dst_type) for update_axis, dst_type in dst.items()
+        ]
+    elif isinstance(src, dict):
+        if axis is not None:
+            raise SpmdTypeError(
+                "mutate_type() expected axis to be omitted when src or dst is a dict."
+            )
+        updates = [
+            (update_axis, src_type, dst) for update_axis, src_type in src.items()
+        ]
+    else:
+        updates = (
+            [(axis, src, dst)]
+            if axis is not None
+            else [(update_axis, src, dst) for update_axis in local_type.keys()]
         )
 
     new_type = dict(local_type)
-    new_type[axis] = dst_local
+    for update_axis, src_type, dst_type in updates:
+        new_type = _mutate_type_single_axis(
+            new_type,
+            update_axis,
+            src=src_type,
+            dst=dst_type,
+        )
     return _set_local_type(tensor, new_type)
 
 

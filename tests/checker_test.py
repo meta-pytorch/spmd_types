@@ -1929,12 +1929,13 @@ class TestMutationTypeChecking(SpmdTypeCheckedTestCase):
 class TestMutateType(LocalTensorTestCase):
     """Test mutate_type for explicit single-axis type transitions."""
 
-    WORLD_SIZE = 6
+    WORLD_SIZE = 12
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+        mesh = init_device_mesh("cpu", (2, 3, 2), mesh_dim_names=("dp", "tp", "cp"))
+        cls.cp = mesh.get_group("cp")
         cls.tp = mesh.get_group("tp")
         cls.dp = mesh.get_group("dp")
 
@@ -1967,6 +1968,56 @@ class TestMutateType(LocalTensorTestCase):
         self.assertIs(get_axis_local_type(x, self.dp), R)
         self.assertIs(get_axis_local_type(x, self.tp), I)
 
+    def test_multiple_axes(self):
+        """mutate_type can update multiple axes in one call."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: R, self.tp: R, self.cp: I})
+
+        mutate_type(x, src=R, dst={self.dp: P, self.tp: I})
+
+        self.assertIs(get_axis_local_type(x, self.dp), P)
+        self.assertIs(get_axis_local_type(x, self.tp), I)
+        self.assertIs(get_axis_local_type(x, self.cp), I)
+
+    def test_multi_axis_mutation_accepts_per_axis_src(self):
+        """Multi-axis mutation validates each axis against its own expected type."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: I})
+
+        mutate_type(x, src={self.dp: V, self.tp: I}, dst={self.dp: R, self.tp: V})
+
+        self.assertIs(get_axis_local_type(x, self.dp), R)
+        self.assertIs(get_axis_local_type(x, self.tp), V)
+
+    def test_multi_axis_mutation_accepts_per_axis_src_with_scalar_dst(self):
+        """Multi-axis mutation can set one dst type after per-axis src checks."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: I})
+
+        mutate_type(x, src={self.dp: V, self.tp: I}, dst=R)
+
+        self.assertIs(get_axis_local_type(x, self.dp), R)
+        self.assertIs(get_axis_local_type(x, self.tp), R)
+
+    def test_multi_axis_mutation_wrong_per_axis_src_raises(self):
+        """A mismatched per-axis src raises before corrupting later axes."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: I})
+
+        with self.assertRaises(SpmdTypeError):
+            mutate_type(x, src={self.dp: V, self.tp: R}, dst={self.dp: R, self.tp: V})
+
+        self.assertIs(get_axis_local_type(x, self.dp), V)
+        self.assertIs(get_axis_local_type(x, self.tp), I)
+
+    def test_multi_axis_mutation_requires_src_for_every_dst_axis(self):
+        """A per-axis src dict must cover every axis in the dst dict."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: I})
+
+        with self.assertRaises(SpmdTypeError):
+            mutate_type(x, src={self.dp: V}, dst={self.dp: R, self.tp: V})
+
     def test_wrong_src_raises(self):
         """Mismatched src raises SpmdTypeError."""
         x = torch.randn(4)
@@ -1980,6 +2031,27 @@ class TestMutateType(LocalTensorTestCase):
         assert_type(x, {self.dp: V})
         with self.assertRaises(SpmdTypeError):
             mutate_type(x, self.tp, src=V, dst=R)
+
+    def test_scalar_mutation_without_axis_updates_all_axes(self):
+        """Scalar src/dst mutation without an axis updates every stored axis."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: V})
+
+        mutate_type(x, src=V, dst=R)
+
+        self.assertIs(get_axis_local_type(x, self.dp), R)
+        self.assertIs(get_axis_local_type(x, self.tp), R)
+
+    def test_scalar_mutation_without_axis_checks_all_axes(self):
+        """Scalar src/dst mutation without an axis checks every stored axis."""
+        x = torch.randn(4)
+        assert_type(x, {self.dp: V, self.tp: I})
+
+        with self.assertRaises(SpmdTypeError):
+            mutate_type(x, src=V, dst=R)
+
+        self.assertIs(get_axis_local_type(x, self.dp), V)
+        self.assertIs(get_axis_local_type(x, self.tp), I)
 
     def test_unannotated_tensor_raises(self):
         """Tensor with no type at all raises SpmdTypeError."""
@@ -2925,6 +2997,22 @@ class TestSingletonAxisDropped(expecttest.TestCase):
         result = mutate_type(x, self.singleton, src=R, dst=V)
         self.assertIs(result, x)
         self.assertIs(get_axis_local_type(x, self.real), R)
+
+    def test_mutate_type_multi_axis_ignores_singleton(self):
+        """Multi-axis mutate_type skips singleton axes."""
+        x = torch.randn(4)
+        assert_type(x, {self.real: R})
+
+        mutate_type(x, src=R, dst={self.singleton: V, self.real: I})
+
+        self.assertIs(get_axis_local_type(x, self.real), I)
+
+        with self.assertRaises(SpmdTypeError):
+            mutate_type(
+                x,
+                src={self.real: I},
+                dst={self.singleton: V, self.real: I},
+            )
 
 
 class TestSingletonAxisStrictMode(expecttest.TestCase):
