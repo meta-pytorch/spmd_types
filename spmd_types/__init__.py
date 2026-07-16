@@ -56,6 +56,8 @@ from spmd_types.runtime import (  # noqa: F401
     assert_local_type_like,
     assert_type,
     assert_type_like,
+    get_partition_spec,
+    has_local_type,
     Infer,
     local,
     local_map,
