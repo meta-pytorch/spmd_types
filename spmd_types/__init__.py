@@ -20,6 +20,7 @@ from spmd_types._collectives import (  # noqa: F401
 )
 from spmd_types._dist import set_dist  # noqa: F401
 from spmd_types._dtensor import (  # noqa: F401
+    dtensor_compute_view,
     dtensor_placement_to_spmd_type,
     dtensor_placements_to_spmd_type,
     dtensor_to_local,

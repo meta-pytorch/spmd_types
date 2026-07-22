@@ -63,3 +63,26 @@ param = spmd.assert_local_block(param)  # final two dimensions are unsharded
 Set `trailing_dims` for other block ranks. The assertion rejects Partial
 tensors, local-only `V` annotations without a `PartitionSpec`, and shards on
 any protected trailing dimension.
+
+## Storage-to-compute views
+
+Use `dtensor_compute_view` when a local computation requires a different
+placement from persistent DTensor storage:
+
+```python
+with spmd.dtensor_compute_view(
+    grad,
+    placements=compute_placements,
+    writeback=True,
+) as local_grad:
+    local_grad.mul_(precomputed_clip_scale)
+```
+
+The context owns placement redistribution and writeback but preserves the
+physical tensor shape. Any logical reshape required by a particular algorithm
+belongs to that algorithm's wrapper, outside this API.
+
+The caller still owns the computation's global semantics. For example,
+gradient clipping must compute `precomputed_clip_scale` using a globally
+correct norm, either by gathering gradients or reducing sharded norm
+contributions before entering the mutable scaling region.

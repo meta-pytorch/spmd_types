@@ -55,7 +55,7 @@ def _typecheck_forward_to_torch_tensor(*args, **kwargs):
     grad_placements = args[1] if len(args) > 1 else None
     if grad_placements is None:
         grad_placements = _normalize_placements_for_grad(input_dtensor.placements)
-    result = _ToTorchTensor.apply(*args, **kwargs)
+    result = torch.ops.aten.alias.default(_ToTorchTensor.apply(*args, **kwargs))
     spmd_type = dtensor_placements_to_spmd_type(
         input_dtensor.device_mesh,
         input_dtensor.placements,

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import contextmanager
 from itertools import zip_longest
+from typing import Iterator
 
 import torch
 from spmd_types._collectives import redistribute
@@ -42,6 +44,7 @@ from torch.distributed.tensor import (
     Shard as DtShard,
 )
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor.placement_types import _StridedShard
 
 
 def dtensor_placement_to_spmd_type(
@@ -80,7 +83,7 @@ def dtensor_placement_to_spmd_type(
         return I
     elif type(placement) is DtShard:
         return S(placement.dim)
-    elif isinstance(placement, DtShard):
+    elif isinstance(placement, (_StridedShard, DtShard)):
         raise NotImplementedError(
             "Strided DTensor shards cannot yet be represented by PartitionSpec"
         )
@@ -165,7 +168,11 @@ def dtensor_to_local(
     if not isinstance(tensor, DTensor):
         raise TypeError(f"dtensor_to_local() expected DTensor, got {type(tensor)}")
 
-    local = tensor.to_local(grad_placements=grad_placements)
+    # Use a fresh alias so SPMD attributes describe this borrow rather than
+    # becoming sticky metadata on DTensor's persistent internal local tensor.
+    local = torch.ops.aten.alias.default(
+        tensor.to_local(grad_placements=grad_placements)
+    )
     spmd_type = dtensor_placements_to_spmd_type(
         tensor.device_mesh,
         tensor.placements,
@@ -177,6 +184,100 @@ def dtensor_to_local(
 
     assert_type(local, spmd_type)
     return local
+
+
+@contextmanager
+def dtensor_compute_view(
+    tensor: DTensor,
+    *,
+    placements: Sequence[DtPlacement] | None = None,
+    writeback: bool,
+    grad_placements: Sequence[DtPlacement] | None = None,
+) -> Iterator[torch.Tensor]:
+    """Borrow a typed local tensor in a requested compute placement.
+
+    This is a general storage-to-compute boundary. It redistributes the input
+    DTensor from its persistent storage placements to ``placements``, exposes a
+    plain physical-shape tensor annotated with the compute SPMD type, and can
+    write mutations back to the original DTensor identity on exit.
+
+    The API deliberately has no optimizer or logical-shape semantics. Callers
+    such as optimizers, gradient clipping, and regularizers choose the compute
+    placements and may apply their own local views after entering the context.
+
+    ``writeback`` is required so mutability is explicit. With ``False``, the
+    yielded tensor is a read-only borrow by contract. With ``True``, the compute
+    value is redistributed back and copied into ``tensor`` in ``finally``. This
+    matches ordinary in-place computation and is not transactional: mutations
+    may be committed when the body raises. When storage and compute placements
+    already match, no redistribution occurs and the local tensor aliases
+    storage directly.
+
+    Gathered ``Replicate`` compute placements are typed as invariant duplicated
+    work by default. A mutable replicated computation must be deterministic
+    across ranks; otherwise writeback can splice inconsistent replica shards
+    into the global value.
+
+    The body and exit must follow SPMD control flow. Writeback may run reverse
+    redistribution collectives, so rank-asymmetric exceptions can deadlock.
+
+    Args:
+        tensor: Persistent DTensor storage object.
+        placements: Target compute placements. ``None`` keeps the storage
+            placements.
+        writeback: Whether computation mutates the value and must be copied back
+            to the persistent storage object.
+        grad_placements: Optional gradient placements for disambiguating
+            Replicate as R versus I in the local SPMD annotation.
+
+    Yields:
+        A typed plain tensor with the physical local shape of the compute
+        DTensor.
+    """
+    if not isinstance(tensor, DTensor):
+        raise TypeError(
+            f"dtensor_compute_view() expected DTensor, got {type(tensor)}"
+        )
+    if not isinstance(writeback, bool):
+        raise TypeError(
+            f"dtensor_compute_view() expected writeback to be bool, got {type(writeback)}"
+        )
+    compute_placements = tuple(tensor.placements if placements is None else placements)
+    if len(compute_placements) != tensor.device_mesh.ndim:
+        raise ValueError(
+            "dtensor_compute_view() expected one compute placement per mesh "
+            f"dimension ({tensor.device_mesh.ndim}), got {len(compute_placements)}"
+        )
+
+    storage_placements = tuple(tensor.placements)
+    if writeback and any(isinstance(p, DtPartial) for p in storage_placements):
+        raise ValueError(
+            "dtensor_compute_view() cannot write back to Partial storage; "
+            "reduce the value before entering a mutable compute region"
+        )
+    if compute_placements == storage_placements:
+        compute = tensor
+    else:
+        compute = tensor.redistribute(
+            placements=compute_placements,
+            async_op=False,
+        )
+
+    with torch.no_grad():
+        try:
+            yield dtensor_to_local(compute, grad_placements=grad_placements)
+        finally:
+            if writeback:
+                if compute_placements == storage_placements:
+                    storage_value = compute
+                else:
+                    storage_value = compute.redistribute(
+                        placements=storage_placements,
+                        async_op=False,
+                    )
+                # Copy through the DTensor wrapper to preserve persistent
+                # identity and advance its version counter.
+                tensor.copy_(storage_value)
 
 
 def spmd_type_to_dtensor_placement(
