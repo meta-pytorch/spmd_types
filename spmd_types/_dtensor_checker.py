@@ -19,8 +19,7 @@ from __future__ import annotations
 
 import torch
 from spmd_types._checker import _TYPECHECK_AUTOGRAD_FUNCTIONS, assert_type
-from spmd_types._dtensor import dtensor_placement_to_spmd_type
-from spmd_types.types import LocalSpmdType, normalize_axis, Shard, V
+from spmd_types._dtensor import dtensor_placements_to_spmd_type
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor._api import _FromTorchTensor, _ToTorchTensor
 
@@ -46,24 +45,6 @@ else:
         return tuple(normalized)
 
 
-def _placements_to_local_type(mesh, placements, grad_placements):
-    """Convert DTensor placements to an SPMD local type dict."""
-    assert len(placements) == len(grad_placements), (
-        f"placements and grad_placements must have the same length, "
-        f"got {len(placements)} and {len(grad_placements)}"
-    )
-    local_type: LocalSpmdType = {}
-    for i, placement in enumerate(placements):
-        pg = mesh.get_group(i)
-        axis = normalize_axis(pg)
-        spmd_type = dtensor_placement_to_spmd_type(placement, grad_placements[i])
-        # S(i) decays to V for local type storage.
-        if isinstance(spmd_type, Shard):
-            spmd_type = V
-        local_type[axis] = spmd_type
-    return local_type
-
-
 def _typecheck_forward_to_torch_tensor(*args, **kwargs):
     """typecheck_forward for _ToTorchTensor: run apply, then assert_type."""
     # _ToTorchTensor.apply(input_dtensor, grad_placements)
@@ -75,10 +56,13 @@ def _typecheck_forward_to_torch_tensor(*args, **kwargs):
     if grad_placements is None:
         grad_placements = _normalize_placements_for_grad(input_dtensor.placements)
     result = _ToTorchTensor.apply(*args, **kwargs)
-    local_type = _placements_to_local_type(
-        input_dtensor.device_mesh, input_dtensor.placements, grad_placements
+    spmd_type = dtensor_placements_to_spmd_type(
+        input_dtensor.device_mesh,
+        input_dtensor.placements,
+        input_dtensor.ndim,
+        grad_placements,
     )
-    assert_type(result, local_type)
+    assert_type(result, spmd_type)
     return result
 
 
@@ -92,7 +76,9 @@ def _typecheck_forward_from_torch_tensor(*args, **kwargs):
     grad_placements = args[6] if len(args) > 6 else None
     if grad_placements is None:
         grad_placements = _normalize_placements_for_grad(placements)
-    expected_type = _placements_to_local_type(device_mesh, placements, grad_placements)
+    expected_type = dtensor_placements_to_spmd_type(
+        device_mesh, placements, input_tensor.ndim, grad_placements
+    )
     assert_type(input_tensor, expected_type)
     return _FromTorchTensor.apply(*args, **kwargs)
 

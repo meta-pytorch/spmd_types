@@ -14,6 +14,7 @@ non-checker) needs to annotate tensors with SPMD types:
 - ``register_autograd_function`` / ``register_local_autograd_function`` /
   ``register_decomposition`` -- autograd.Function registration decorators
 - ``has_local_type`` / ``get_partition_spec`` -- queries
+- ``assert_local_block`` -- validate tensors for local block computation
 - ``trace`` -- logging
 
 Crucially, this module does NOT depend on ``_checker.py`` (the type
@@ -223,6 +224,103 @@ def _set_partition_spec(tensor: torch.Tensor, spec: PartitionSpec | None) -> Non
         setattr(tensor, _PARTITION_SPEC_ATTR, spec)
     elif hasattr(tensor, _PARTITION_SPEC_ATTR):
         delattr(tensor, _PARTITION_SPEC_ATTR)
+
+
+@api_boundary
+def assert_local_block(tensor: torch.Tensor, trailing_dims: int = 2) -> torch.Tensor:
+    """Assert that each rank holds complete trailing blocks of ``tensor``.
+
+    This is intended for local matrix computations such as Muon optimizer
+    updates. The tensor must be a globally annotated plain tensor. Global
+    sharding is allowed on leading dimensions, but the final ``trailing_dims``
+    dimensions must be unsharded. Partial values and Varying axes without a
+    qualifying ``PartitionSpec`` are not complete local blocks.
+
+    Args:
+        tensor: The globally annotated plain tensor to validate.
+        trailing_dims: Number of trailing dimensions that must be unsharded.
+
+    Returns:
+        ``tensor`` unchanged.
+
+    Raises:
+        TypeError: If ``tensor`` is not a plain tensor or ``trailing_dims`` is
+            not an integer.
+        ValueError: If ``trailing_dims`` is less than one or exceeds the tensor
+            rank.
+        SpmdTypeError: If the tensor is unannotated, Partial, has an unqualified
+            Varying axis, or is sharded on a protected trailing dimension.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(
+            f"assert_local_block() expected a torch.Tensor, got {type(tensor)!r}"
+        )
+    if isinstance(tensor, DTensor):
+        raise TypeError(
+            "assert_local_block() expects a plain tensor, not a DTensor. "
+            "Annotate and validate the DTensor's local tensor instead."
+        )
+    if isinstance(trailing_dims, bool) or not isinstance(trailing_dims, int):
+        raise TypeError(
+            "assert_local_block() expected trailing_dims to be an integer, "
+            f"got {type(trailing_dims)!r}"
+        )
+    if trailing_dims < 1:
+        raise ValueError(
+            "assert_local_block() requires trailing_dims to be at least 1, "
+            f"got {trailing_dims}"
+        )
+    if trailing_dims > tensor.ndim:
+        raise ValueError(
+            f"assert_local_block() cannot protect {trailing_dims} trailing "
+            f"dimensions of a rank-{tensor.ndim} tensor"
+        )
+    if not has_local_type(tensor):
+        raise SpmdTypeError(
+            "assert_local_block() requires a globally annotated tensor. "
+            "Annotate it with assert_type() first."
+        )
+
+    local_type = get_local_type(tensor)
+    spec = get_partition_spec(tensor)
+    if spec is not None and len(spec) != tensor.ndim:
+        raise SpmdTypeError(
+            f"Tensor has a PartitionSpec of length {len(spec)}, but its rank is "
+            f"{tensor.ndim}. Re-annotate it with assert_type()."
+        )
+    spec_axes = spec.axes_with_partition_spec() if spec is not None else set()
+
+    for axis, typ in local_type.items():
+        if typ is P:
+            raise SpmdTypeError(
+                f"Tensor is Partial on axis {format_axis(axis)} and does not "
+                "hold complete local blocks. Reduce it before local computation."
+            )
+        if typ is V and axis not in spec_axes:
+            raise SpmdTypeError(
+                f"Tensor is Varying on axis {format_axis(axis)} without a "
+                "PartitionSpec entry. Local-only V does not identify complete "
+                "local blocks."
+            )
+
+    for axis in spec_axes:
+        if local_type.get(axis) is not V:
+            raise SpmdTypeError(
+                f"Tensor has a PartitionSpec entry for axis {format_axis(axis)}, "
+                f"but its local type is {local_type.get(axis)!r}, not V."
+            )
+
+    if spec is not None:
+        first_trailing_dim = tensor.ndim - trailing_dims
+        for dim in range(first_trailing_dim, tensor.ndim):
+            if spec[dim] is not None:
+                raise SpmdTypeError(
+                    f"Tensor dimension {dim} is sharded by {spec[dim]!r}, but "
+                    f"the final {trailing_dims} dimensions must be unsharded "
+                    "for local block computation."
+                )
+
+    return tensor
 
 
 def _update_axis_in_partition_spec(  # noqa: C901

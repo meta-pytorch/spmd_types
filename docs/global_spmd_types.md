@@ -49,3 +49,17 @@ spmd.assert_type(x, {}, PartitionSpec(None, None, tp))
 # or, being explicit about dp being Varying without a global type:
 spmd.assert_type(x, {dp: spmd.V}, PartitionSpec(None, None, tp))
 ```
+
+## Local matrix blocks
+
+Optimizers such as Muon apply matrix operations independently to complete
+local blocks. Validate that a globally annotated plain tensor is only sharded
+on leading dimensions before entering that computation:
+
+```python
+param = spmd.assert_local_block(param)  # final two dimensions are unsharded
+```
+
+Set `trailing_dims` for other block ranks. The assertion rejects Partial
+tensors, local-only `V` annotations without a `PartitionSpec`, and shards on
+any protected trailing dimension.
