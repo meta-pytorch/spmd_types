@@ -56,6 +56,14 @@ Lightweight runtime API for SPMD type annotations. This module does
 be imported in model code without pulling in the heavy checker logic.
 
 ```{eval-rst}
+.. autofunction:: spmd_types.runtime.assert_local_block
+
+.. autofunction:: spmd_types.dtensor_to_local
+
+.. autofunction:: spmd_types.dtensor_compute_view
+
+.. autofunction:: spmd_types.dtensor_placements_to_spmd_type
+
 .. autofunction:: spmd_types.runtime.assert_type
 
 .. autofunction:: spmd_types.runtime.assert_local_type

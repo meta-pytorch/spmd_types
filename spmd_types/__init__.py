@@ -20,7 +20,10 @@ from spmd_types._collectives import (  # noqa: F401
 )
 from spmd_types._dist import set_dist  # noqa: F401
 from spmd_types._dtensor import (  # noqa: F401
+    dtensor_compute_view,
     dtensor_placement_to_spmd_type,
+    dtensor_placements_to_spmd_type,
+    dtensor_to_local,
     spmd_redistribute,
     spmd_type_to_dtensor_placement,
 )
@@ -52,6 +55,7 @@ from spmd_types._type_attr import (  # noqa: F401
 
 # Collectives and operations -- runtime API (no _checker dependency)
 from spmd_types.runtime import (  # noqa: F401
+    assert_local_block,
     assert_local_type,
     assert_local_type_like,
     assert_type,
