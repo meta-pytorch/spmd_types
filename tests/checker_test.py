@@ -47,6 +47,7 @@ from spmd_types._collectives import all_reduce
 from spmd_types._mesh import _pg_for_axis
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
+from spmd_types._state import is_type_checking
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type, get_local_type
 from spmd_types.types import normalize_axis, PartitionSpec, SpmdType, SpmdTypeError
@@ -3623,6 +3624,42 @@ class TestLocal(SpmdTypeCheckedTestCase):
         with local():
             y = x * 2.0
         self.assertIs(get_axis_local_type(y, self.pg), R)
+
+
+class TestNoTypecheckDecorator(LocalTensorTestCase, expecttest.TestCase):
+    def test_decorator_form(self):
+        with set_current_mesh(self.mesh):
+            x = self._generate_inputs((4, 3), self.pg, S(0))
+
+            @no_typecheck(out_types={"tp": S(1)})
+            def fn(x):
+                self.assertFalse(is_type_checking())
+                return x.transpose(0, 1)
+
+            with typecheck():
+                y = fn(x)
+                self.assertIs(get_axis_local_type(y, self.pg), V)
+                self.assertEqual(
+                    get_partition_spec(y),
+                    PartitionSpec(None, normalize_axis("tp")),
+                )
+
+    def test_context_form_rejects_types(self):
+        with typecheck():
+            with no_typecheck():
+                self.assertFalse(is_type_checking())
+        with self.assertRaises(TypeError) as ctx:
+            no_typecheck(in_types=({"tp": R},))
+        self.assertExpectedInline(
+            str(ctx.exception), """out_types is required for typed no_typecheck"""
+        )
+        with self.assertRaises(TypeError) as ctx:
+            with no_typecheck(out_types={"tp": R}):
+                pass
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """'function' object does not support the context manager protocol""",
+        )
 
 
 class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):

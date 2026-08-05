@@ -9,5 +9,5 @@ from spmd_types._checker import (  # noqa: F401
     _SpmdTypeBackwardCompatibleMode as SpmdTypeMode,
     typecheck,
 )
-from spmd_types._state import is_type_checking, no_typecheck  # noqa: F401
-from spmd_types.runtime import local_map  # noqa: F401
+from spmd_types._state import is_type_checking  # noqa: F401
+from spmd_types.runtime import local_map, no_typecheck  # noqa: F401

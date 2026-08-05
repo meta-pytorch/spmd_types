@@ -68,6 +68,7 @@ from spmd_types.runtime import (  # noqa: F401
     get_partition_spec,
     has_local_type,
     mutate_type,
+    no_typecheck,
     register_autograd_function,
     register_decomposition,
     register_local_autograd_function,
@@ -3084,9 +3085,6 @@ def typecheck(
             _backward_hooks.uninstall()
             _vmap.uninstall()
             _remove_autograd_apply_patch()
-
-
-from spmd_types._state import no_typecheck  # noqa: F401
 
 
 class _SpmdTypeBackwardCompatibleMode:

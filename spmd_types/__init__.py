@@ -41,7 +41,6 @@ from spmd_types._state import (  # noqa: F401
     current_mesh_all_names,
     current_mesh_names,
     is_type_checking,
-    no_typecheck,
 )
 from spmd_types._traceback import traceback_filtering  # noqa: F401
 from spmd_types._type_attr import (  # noqa: F401
@@ -62,6 +61,7 @@ from spmd_types.runtime import (  # noqa: F401
     local,
     local_map,
     mutate_type,
+    no_typecheck,
     register_autograd_function,
     register_decomposition,
     register_local_autograd_function,

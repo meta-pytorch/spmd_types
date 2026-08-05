@@ -45,7 +45,7 @@ def is_type_checking() -> bool:
 
 
 @contextmanager
-def no_typecheck():
+def _no_typecheck_context():
     """Temporarily disable type checking on this thread (like ``no_grad``)."""
     mode = _current_mode()
     if mode is not None:

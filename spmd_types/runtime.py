@@ -27,14 +27,14 @@ from __future__ import annotations
 import builtins
 import logging
 import os
-from contextlib import contextmanager
-from typing import Any, TypeAlias
+from contextlib import AbstractContextManager, contextmanager
+from typing import Any, Callable, overload, TypeAlias
 
 import torch
 from spmd_types._frame import _get_user_frame
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
-from spmd_types._state import current_mesh, is_type_checking
+from spmd_types._state import _no_typecheck_context, current_mesh, is_type_checking
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import (
     _LOCAL_TYPE_ATTR,
@@ -980,7 +980,32 @@ def local():
         yield
 
 
-def local_map(  # noqa: C901
+@overload
+def no_typecheck() -> AbstractContextManager[None]: ...
+
+
+@overload
+def no_typecheck(
+    *, out_types: Any, in_types: Any = ...
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
+
+
+def no_typecheck(**kwargs: Any):
+    """Disable checking in a context or across an explicitly typed function."""
+    if not kwargs:
+        return _no_typecheck_context()
+    if "out_types" not in kwargs or kwargs.keys() - {"in_types", "out_types"}:
+        raise TypeError("out_types is required for typed no_typecheck")
+
+    return _typecheck_boundary(
+        name="no_typecheck",
+        body_context=_no_typecheck_context,
+        in_types=kwargs.get("in_types", Infer),
+        out_types=kwargs["out_types"],
+    )
+
+
+def local_map(
     *,
     in_types: Any = Infer,
     out_types: Any,
@@ -1052,12 +1077,23 @@ def local_map(  # noqa: C901
         def fn(x, weights):
             return x @ weights[0], x @ weights[1]
     """
+    return _typecheck_boundary(
+        name="local_map",
+        body_context=local,
+        in_types=in_types,
+        out_types=out_types,
+    )
+
+
+def _typecheck_boundary(  # noqa: C901
+    *, name: str, body_context: Any, in_types: Any, out_types: Any
+):
     import functools
 
     from torch.utils._pytree import tree_map
 
     def decorator(fn):
-        prefix = f"local_map[{fn.__qualname__}]"
+        prefix = f"{name}[{fn.__qualname__}]"
 
         def _check_arg(arg: object, spec: _LocalMapSpecLeaf, kind: str) -> None:
             if spec is None:
@@ -1159,7 +1195,7 @@ def local_map(  # noqa: C901
             if in_types is not Infer:
                 _walk_boundary(args, in_types, "input")
 
-            with local():
+            with body_context():
                 result = fn(*args, **kwargs)
 
             _walk_boundary(result, out_types, "output")
