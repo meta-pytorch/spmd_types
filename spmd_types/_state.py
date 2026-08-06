@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 class MeshEntry(NamedTuple):
     axes: frozenset[MeshAxis]
+    local_axes: frozenset[MeshAxis]
     names: dict[str, MeshAxis]
     all_names: dict[str, MeshAxis]
     pgs: dict[MeshAxis, ProcessGroup]
@@ -75,12 +76,16 @@ def is_strict() -> bool:
     return mode is not None and mode._strict
 
 
+def _current_mesh_entry() -> MeshEntry | None:
+    """Return the active mesh-stack entry, or None if no mesh is set."""
+    stack: list[MeshEntry] = getattr(_tls, "mesh_stack", [])
+    return stack[-1] if stack else None
+
+
 def current_mesh() -> frozenset[MeshAxis] | None:
     """Return the current mesh axes, or None if no mesh is set."""
-    stack = getattr(_tls, "mesh_stack", None)
-    if stack:
-        return stack[-1].axes
-    return None
+    entry = _current_mesh_entry()
+    return entry.axes if entry is not None else None
 
 
 def current_mesh_names() -> dict[str, MeshAxis] | None:
@@ -89,18 +94,14 @@ def current_mesh_names() -> dict[str, MeshAxis] | None:
     Only includes non-singleton axes, consistent with ``current_mesh()``.
     Use ``current_mesh_all_names()`` to include singleton axes.
     """
-    stack = getattr(_tls, "mesh_stack", None)
-    if stack:
-        return stack[-1].names
-    return None
+    entry = _current_mesh_entry()
+    return entry.names if entry is not None else None
 
 
 def current_mesh_all_names() -> dict[str, MeshAxis] | None:
     """Return the full name-to-axis mapping including singleton axes, or None."""
-    stack = getattr(_tls, "mesh_stack", None)
-    if stack:
-        return stack[-1].all_names
-    return None
+    entry = _current_mesh_entry()
+    return entry.all_names if entry is not None else None
 
 
 def _axes_to_pgs(
@@ -133,6 +134,7 @@ def _push_mesh(
     | dict[str, MeshAxis],
     names: dict[str, MeshAxis] | None = None,
     pgs: dict[MeshAxis, ProcessGroup] | None = None,
+    local_axes: frozenset[MeshAxis] = frozenset(),
 ) -> None:
     if isinstance(mesh, frozenset):
         resolved, resolved_names = mesh, names if names is not None else {}
@@ -149,7 +151,9 @@ def _push_mesh(
     filtered_names = {k: v for k, v in resolved_names.items() if v in resolved}
     if not hasattr(_tls, "mesh_stack"):
         _tls.mesh_stack = []
-    _tls.mesh_stack.append(MeshEntry(resolved, filtered_names, all_names, resolved_pgs))
+    _tls.mesh_stack.append(
+        MeshEntry(resolved, local_axes, filtered_names, all_names, resolved_pgs)
+    )
 
 
 def _pop_mesh() -> MeshEntry:
@@ -164,6 +168,12 @@ def _find_name_in_stack(name: str) -> bool:
 
 def _clear_mesh_stack() -> None:
     _tls.mesh_stack = []
+
+
+def _current_local_axes() -> frozenset[MeshAxis]:
+    """Return the local axes for the active mesh, or an empty set."""
+    entry = _current_mesh_entry()
+    return entry.local_axes if entry is not None else frozenset()
 
 
 def _is_global() -> bool:

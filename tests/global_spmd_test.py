@@ -25,6 +25,7 @@ the local type is upgraded from V to P.
 import unittest
 import unittest.mock
 
+import expecttest
 import torch
 import torch.distributed as dist
 from spmd_types import (
@@ -33,12 +34,14 @@ from spmd_types import (
     all_to_all,
     convert,
     I,
+    local,
     P,
     PartitionSpec,
     R,
     redistribute,
     reduce_scatter,
     S,
+    set_current_mesh,
     V,
 )
 from spmd_types._checker import (
@@ -173,6 +176,205 @@ class GlobalSpmdTestCase(LocalTensorTestCase):
             result = self.rank_map(lambda r: torch.randn(shape) + r)
         assert_type(result, types)
         return result
+
+
+class TestMixedGlobalAxes(LocalTensorTestCase, expecttest.TestCase):
+    MESH_SHAPE = (2, 2)
+    MESH_DIM_NAMES = ("dp", "tp")
+
+    def test_local_axes_can_reuse_current_mesh(self):
+        x = self.rank_map(lambda rank: torch.tensor(float(rank // 2)))
+
+        with typecheck(local=False), set_current_mesh(self.mesh):
+            with set_current_mesh(local_axes=("dp",)):
+                assert_type(x, {"dp": V, "tp": I})
+                y = redistribute(x, "dp", src=V, dst=I)
+                self.assertIs(get_axis_local_type(y, "dp"), I)
+                self.assertIs(get_axis_local_type(y, "tp"), I)
+
+    def test_redistribute_local_dp_v_to_i_with_global_tp_i(self):
+        full = torch.arange(1, self.MESH_SHAPE[0] + 1, dtype=torch.float)
+        x = self.rank_map(lambda rank: full[rank // self.MESH_SHAPE[1]].clone())
+
+        with typecheck(local=False), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": V, "tp": I})
+            y = redistribute(x, "dp", src=V, dst=I)
+            self.assertIs(get_axis_local_type(y, "dp"), I)
+            self.assertIs(get_axis_local_type(y, "tp"), I)
+
+        self._assert_all_ranks_equal(y)
+        dp = normalize_axis(self.mesh.get_group("dp"))
+        torch.testing.assert_close(_to_global(y, I, dp), full)
+
+    def test_redistribute_local_dp_v_to_p_to_i_with_global_tp_p(self):
+        full = torch.arange(1, self.MESH_SHAPE[0] + 1, dtype=torch.float)
+
+        def local_partial(rank):
+            dp_rank, tp_rank = divmod(rank, self.MESH_SHAPE[1])
+            return full[dp_rank].clone() if tp_rank == 0 else torch.zeros(())
+
+        x = self.rank_map(local_partial)
+
+        with typecheck(local=False), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": V, "tp": P})
+            partial = redistribute(x, "dp", src=V, dst=P)
+            y = redistribute(partial, "dp", src=P, dst=I)
+            self.assertIs(get_axis_local_type(partial, "dp"), P)
+            self.assertIs(get_axis_local_type(partial, "tp"), P)
+            self.assertIs(get_axis_local_type(y, "dp"), I)
+            self.assertIs(get_axis_local_type(y, "tp"), P)
+
+        tp = normalize_axis(self.mesh.get_group("tp"))
+        torch.testing.assert_close(_to_global(y, P, tp), full)
+
+    def test_local_dp_with_global_tp(self):
+        x = self.rank_map(lambda rank: torch.randn(4, 4) + rank)
+        w_col_by_tp = [torch.randn(4, 3), torch.randn(4, 3)]
+        w_col = self.rank_map(lambda rank: w_col_by_tp[rank % 2].clone())
+        w_row_by_tp = [torch.randn(3, 4), torch.randn(3, 4)]
+        w_row = self.rank_map(lambda rank: w_row_by_tp[rank % 2].clone())
+
+        with typecheck(local=False), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": V, "tp": R})
+            assert_type(w_col, {"dp": R, "tp": S(1)})
+            assert_type(w_row, {"dp": R, "tp": S(0)})
+
+            h = x @ w_col
+            self.assertIs(get_axis_local_type(h, "dp"), V)
+            self.assertEqual(_get_axis_type(h, "tp"), S(1))
+
+            partial = h @ w_row
+            self.assertIs(get_axis_local_type(partial, "dp"), V)
+            self.assertIs(get_axis_local_type(partial, "tp"), P)
+
+            y = all_reduce(partial, "tp", src=P, dst=R)
+            self.assertIs(get_axis_local_type(y, "dp"), V)
+            self.assertIs(get_axis_local_type(y, "tp"), R)
+
+    def test_collective_rejects_mixed_policy_axis(self):
+        x = self.rank_map(lambda rank: torch.tensor(float(rank)))
+
+        with typecheck(local=False), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": P, "tp": P})
+            self.assertExpectedRaisesInline(
+                SpmdTypeError,
+                lambda: redistribute(x, self.pg, src=P, dst=I),
+                """\
+Collective axis default_pg spans mesh axes with mixed typechecking policies: local axes (mesh_dp) and global axes (mesh_tp). Pass a collective axis whose component axes are all local or all global.
+
+  In redistribute(
+    x: f32[] {mesh_dp: P, mesh_tp: P},
+    axis: default_pg,
+    src: P,
+    dst: I,
+    op_dtype: None,
+    out_dtype: None,
+    backward_options: None,
+  ) under mesh {mesh_dp, mesh_tp}""",
+            )
+
+    def test_local_axes_must_precede_global_axes(self):
+        with self.assertRaises(ValueError) as ctx:
+            with set_current_mesh(self.mesh, local_axes=("tp",)):
+                pass
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """local_axes must come before all global axes in outer-to-inner mesh order; got local_axes=(mesh_tp) for mesh=(mesh_dp, mesh_tp)""",
+        )
+
+    def test_local_axes_rejects_duplicates(self):
+        with self.assertRaises(ValueError) as ctx:
+            with set_current_mesh(self.mesh, local_axes=("dp", "dp")):
+                pass
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """local_axes must not contain duplicate axes; got ('dp', 'dp'); duplicate axes: (mesh_dp)""",
+        )
+
+    def test_local_axes_rejects_unknown_name(self):
+        with self.assertRaises(ValueError) as ctx:
+            with set_current_mesh(self.mesh, local_axes=("unknown",)):
+                pass
+        self.assertExpectedInline(
+            str(ctx.exception),
+            """local_axes contains names not present in this mesh: ('unknown',); available names: ('dp', 'tp')""",
+        )
+
+    def test_local_axes_accepts_concrete_axes(self):
+        for local_axis in (
+            normalize_axis(self.mesh.get_group("dp")),
+            self.mesh.get_group("dp"),
+        ):
+            with self.subTest(local_axis=local_axis):
+                with set_current_mesh(self.mesh, local_axes=(local_axis,)):
+                    pass
+
+    def test_all_axes_can_be_local(self):
+        x = self.rank_map(lambda rank: torch.randn(4, 4) + rank)
+        with (
+            typecheck(local=False),
+            set_current_mesh(self.mesh, local_axes=("dp", "tp")),
+        ):
+            assert_type(x, {"dp": V, "tp": V})
+            y = x + x
+            self.assertIs(get_axis_local_type(y, "dp"), V)
+            self.assertIs(get_axis_local_type(y, "tp"), V)
+
+    def test_local_nested_inside_mixed_mode(self):
+        x = self.rank_map(lambda rank: torch.randn(4, 4) + rank)
+        with typecheck(local=False), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": V, "tp": V})
+            with local():
+                y = x + x
+                self.assertIs(get_axis_local_type(y, "dp"), V)
+                self.assertIs(get_axis_local_type(y, "tp"), V)
+            with self.assertRaises(SpmdTypeError):
+                x + x
+
+    def test_local_axes_only_refines_global_typechecking(self):
+        x = self.rank_map(lambda rank: torch.randn(4, 4) + rank)
+        with typecheck(local=True), set_current_mesh(self.mesh, local_axes=("dp",)):
+            assert_type(x, {"dp": V, "tp": V})
+            y = x + x
+            self.assertIs(get_axis_local_type(y, "dp"), V)
+            self.assertIs(get_axis_local_type(y, "tp"), V)
+
+
+class TestNestedMixedMeshPolicies(LocalTensorTestCase):
+    MESH_SHAPE = (2, 2, 2)
+    MESH_DIM_NAMES = ("dp", "cp", "tp")
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.inner_mesh = init_device_mesh(
+            "cpu",
+            (2, 2, 2),
+            mesh_dim_names=("dp_replicate", "ep", "etp"),
+        )
+
+    def test_nested_meshes_have_independent_local_axes(self):
+        def check_varying_axis(axis, mesh_axes, *, is_local):
+            x = self.rank_map(lambda rank: torch.full((4, 4), float(rank)))
+            assert_type(x, {name: V if name == axis else R for name in mesh_axes})
+            if is_local:
+                x + x
+            else:
+                with self.assertRaises(SpmdTypeError):
+                    x + x
+
+        with (
+            typecheck(local=False),
+            set_current_mesh(self.mesh, local_axes=("dp", "cp")),
+        ):
+            outer_axes = ("dp", "cp", "tp")
+            check_varying_axis("cp", outer_axes, is_local=True)
+            check_varying_axis("tp", outer_axes, is_local=False)
+
+            with set_current_mesh(self.inner_mesh, local_axes=("dp_replicate",)):
+                inner_axes = ("dp_replicate", "ep", "etp")
+                check_varying_axis("dp_replicate", inner_axes, is_local=True)
+                check_varying_axis("ep", inner_axes, is_local=False)
 
 
 # =============================================================================
@@ -1727,7 +1929,7 @@ class TestCrossMeshSpecRemapping(unittest.TestCase):
             )
             with set_current_mesh(frozenset({self.dp_cp, self.tp})):
                 with self.assertRaises(SpmdTypeError):
-                    result = torch.add(x, x)
+                    torch.add(x, x)
 
 
 if __name__ == "__main__":

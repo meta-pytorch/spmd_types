@@ -3456,7 +3456,9 @@ class TestValidatePartitionSpecForGlobalSpmd(LocalTensorTestCase):
         x = torch.zeros(4, 3)
         assert_type(x, {self.pg: S(0)})
         _validate_partition_spec_for_global_spmd(
-            get_local_type(x), get_partition_spec(x)
+            get_local_type(x),
+            get_partition_spec(x),
+            is_global_axis=lambda _: True,
         )
 
     def test_passes_replicate_without_partition_spec(self):
@@ -3464,7 +3466,9 @@ class TestValidatePartitionSpecForGlobalSpmd(LocalTensorTestCase):
         x = torch.zeros(4, 3)
         assert_type(x, {self.pg: R})
         _validate_partition_spec_for_global_spmd(
-            get_local_type(x), get_partition_spec(x)
+            get_local_type(x),
+            get_partition_spec(x),
+            is_global_axis=lambda _: True,
         )
 
     def test_fails_v_without_partition_spec(self):
@@ -3473,7 +3477,9 @@ class TestValidatePartitionSpecForGlobalSpmd(LocalTensorTestCase):
         assert_type(x, {self.pg: V})
         with self.assertRaises(SpmdTypeError):
             _validate_partition_spec_for_global_spmd(
-                get_local_type(x), get_partition_spec(x)
+                get_local_type(x),
+                get_partition_spec(x),
+                is_global_axis=lambda _: True,
             )
 
     def test_global_mode_rejects_v_without_spec(self):

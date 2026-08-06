@@ -13,8 +13,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from spmd_types._mesh_axis import MeshAxis
-from spmd_types._state import _axes_to_pgs, _pop_mesh, _push_mesh
-from spmd_types.types import DeviceMeshAxis, normalize_mesh
+from spmd_types._state import _axes_to_pgs, _current_mesh_entry, _pop_mesh, _push_mesh
+from spmd_types.types import DeviceMeshAxis, format_axis, normalize_axis, normalize_mesh
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
@@ -24,8 +24,14 @@ if TYPE_CHECKING:
 @contextmanager
 def set_current_mesh(
     axes: (
-        frozenset[MeshAxis] | DeviceMesh | Sequence[ProcessGroup] | dict[str, MeshAxis]
-    ),
+        frozenset[MeshAxis]
+        | DeviceMesh
+        | Sequence[ProcessGroup]
+        | dict[str, MeshAxis]
+        | None
+    ) = None,
+    *,
+    local_axes: tuple[DeviceMeshAxis, ...] = (),
 ):
     """Context manager that pushes a mesh onto the stack.
 
@@ -37,17 +43,97 @@ def set_current_mesh(
             - A frozenset of orthogonal MeshAxis objects (no string lookup).
             - A sequence of ProcessGroup objects, each converted via
               ``MeshAxis.of()`` (no string lookup).
+            When omitted, reuses the current mesh.
+        local_axes: An outer prefix of mesh axes that retains local SPMD
+            semantics during global type checking. Each coordinate on these
+            axes selects an independent local tensor; the remaining inner axes
+            describe the global sharding of that tensor. For example, with
+            ``dp`` local and ``tp`` global, each ``dp`` coordinate has a
+            separate tensor globally sharded across ``tp``.
 
     Singleton (size-1) axes are dropped from the active axis set via
     ``normalize_mesh`` but remain in the name lookup table
     (``current_mesh_all_names``).
     """
-    resolved, names = _resolve_axes(axes)
-    _push_mesh(resolved, names, _axes_to_pgs(axes))
+    if axes is None:
+        entry = _current_mesh_entry()
+        if entry is None:
+            raise RuntimeError(
+                "set_current_mesh() without axes requires a current mesh"
+            )
+        resolved, names, pgs = entry.axes, entry.all_names, entry.pgs
+    else:
+        resolved, names = _resolve_axes(axes)
+        pgs = _axes_to_pgs(axes)
+    resolved_local_axes = _resolve_local_axes(local_axes, resolved, names)
+    _push_mesh(
+        resolved,
+        names,
+        pgs,
+        local_axes=resolved_local_axes,
+    )
     try:
         yield
     finally:
         _pop_mesh()
+
+
+def _resolve_local_axes(
+    local_axes: tuple[DeviceMeshAxis, ...],
+    mesh: frozenset[MeshAxis],
+    names: dict[str, MeshAxis],
+) -> frozenset[MeshAxis]:
+    """Resolve ``local_axes`` to members of ``mesh``.
+
+    Rejects unknown or duplicate axes and requires the local axes to be the
+    outermost axes and the global axes to be the innermost axes. For a
+    ``(dp, tp)`` mesh, ``("dp",)`` is valid but ``("tp",)`` is not.
+
+    Returns the resolved local axes as a ``frozenset[MeshAxis]``.
+    """
+    unknown = tuple(
+        axis for axis in local_axes if isinstance(axis, str) and axis not in names
+    )
+    if unknown:
+        raise ValueError(
+            f"local_axes contains names not present in this mesh: {unknown!r}; "
+            f"available names: {tuple(sorted(names))!r}"
+        )
+    resolved_list = tuple(
+        names[axis] if isinstance(axis, str) else normalize_axis(axis)
+        for axis in local_axes
+    )
+    if len(set(resolved_list)) != len(resolved_list):
+        duplicates = {axis for axis in resolved_list if resolved_list.count(axis) > 1}
+        duplicate_names = ", ".join(format_axis(axis) for axis in duplicates)
+        raise ValueError(
+            f"local_axes must not contain duplicate axes; got {local_axes!r}; "
+            f"duplicate axes: ({duplicate_names})"
+        )
+    resolved = frozenset(resolved_list)
+    if not resolved <= mesh:
+        outside = resolved - mesh
+        outside_names = ", ".join(format_axis(axis) for axis in outside)
+        mesh_names = ", ".join(format_axis(axis) for axis in sorted(mesh, key=repr))
+        raise ValueError(
+            f"local_axes contains axes outside this mesh: ({outside_names}); "
+            f"current mesh axes: ({mesh_names})"
+        )
+
+    ordered = sorted(
+        mesh,
+        key=lambda axis: max(stride for _, stride in axis.layout.sizes_and_strides),
+        reverse=True,
+    )
+    prefix = set(ordered[: len(resolved)])
+    if set(resolved) != prefix:
+        local_names = ", ".join(format_axis(axis) for axis in resolved)
+        mesh_names = ", ".join(format_axis(axis) for axis in ordered)
+        raise ValueError(
+            "local_axes must come before all global axes in outer-to-inner mesh "
+            f"order; got local_axes=({local_names}) for mesh=({mesh_names})"
+        )
+    return resolved
 
 
 def _pg_for_axis(axis: DeviceMeshAxis) -> ProcessGroup:
@@ -57,14 +143,13 @@ def _pg_for_axis(axis: DeviceMeshAxis) -> ProcessGroup:
     ``MeshAxis``. Raises ``RuntimeError`` if no current mesh carries process
     groups, or if the axis is not part of it.
     """
-    from spmd_types._state import _tls, current_mesh_all_names
     from torch.distributed import ProcessGroup
 
     if isinstance(axis, ProcessGroup):
         return axis
 
-    stack = getattr(_tls, "mesh_stack", None)
-    pgs = stack[-1].pgs if stack else None
+    entry = _current_mesh_entry()
+    pgs = entry.pgs if entry is not None else None
     if not pgs:
         raise RuntimeError(
             "Passing an axis name to a redistribution or collective "
@@ -73,7 +158,7 @@ def _pg_for_axis(axis: DeviceMeshAxis) -> ProcessGroup:
         )
 
     if isinstance(axis, str):
-        resolved = (current_mesh_all_names() or {}).get(axis)
+        resolved = entry.all_names.get(axis) if entry is not None else None
     else:
         resolved = axis
     if resolved is None or resolved not in pgs:

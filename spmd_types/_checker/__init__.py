@@ -2532,6 +2532,8 @@ def _get_autograd_function_class(func) -> type | None:
 def _validate_partition_spec_for_global_spmd(
     local_type: LocalSpmdType,
     spec: PartitionSpec | None,
+    *,
+    is_global_axis: Callable[[MeshAxis], bool],
 ) -> None:
     """Validate PartitionSpec <-> local type consistency.
 
@@ -2544,10 +2546,12 @@ def _validate_partition_spec_for_global_spmd(
     Args:
         local_type: The tensor's local SPMD type dict.
         spec: The tensor's PartitionSpec (None if absent).
+        is_global_axis: Returns whether an axis requires global PartitionSpec
+            validation in the current mesh context.
     """
     spec_axes = spec.axes_with_partition_spec() if spec is not None else set()
     for axis, typ in local_type.items():
-        if typ is V and axis not in spec_axes:
+        if is_global_axis(axis) and typ is V and axis not in spec_axes:
             ax = format_axis(axis)
             raise SpmdTypeError(
                 f"Tensor has Varying type on axis {ax} but no PartitionSpec entry. "
@@ -2556,7 +2560,7 @@ def _validate_partition_spec_for_global_spmd(
             )
     for axis in spec_axes:
         typ = local_type.get(axis)
-        if typ is not V:
+        if is_global_axis(axis) and typ is not V:
             ax = format_axis(axis)
             raise SpmdTypeError(
                 f"Tensor has PartitionSpec on axis {ax} but local type is "
@@ -2624,6 +2628,23 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
         self._disabled = False
 
+    def _is_global_axis(self, axis: MeshAxis) -> bool:
+        if self._local:
+            return False
+        local_axes = _state._current_local_axes()
+        if not local_axes:
+            return True
+        mesh = _state.current_mesh()
+        if mesh is None or axis not in mesh:
+            raise SpmdTypeError(
+                f"Axis {format_axis(axis)} is not in the current mesh, so its "
+                "local/global typechecking policy is undefined"
+            )
+        return axis not in local_axes
+
+    def _global_axes_for(self, axes: Iterable[MeshAxis]) -> set[MeshAxis]:
+        return {axis for axis in axes if self._is_global_axis(axis)}
+
     def __torch_function__(self, func, types, args=(), kwargs=None):  # noqa: C901
         kwargs = kwargs or {}
         # Paused via no_typecheck(): run without type checking.
@@ -2680,7 +2701,11 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
             # Global SPMD validation.
             if not self._local:
                 for local_type, spec in zip(info.tensor_types, info.partition_specs):
-                    _validate_partition_spec_for_global_spmd(local_type, spec)
+                    _validate_partition_spec_for_global_spmd(
+                        local_type,
+                        spec,
+                        is_global_axis=self._is_global_axis,
+                    )
 
             # Typecheck-registered autograd function: dispatch to typecheck_forward
             # INSTEAD of executing func.  The mode is popped off the
@@ -2745,6 +2770,29 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                 # Resolve axis to a list of matching axes on the tensor.
                 # Direct match: [axis]. Flattened decomposition: [sub1, sub2, ...].
                 resolved_axes = _resolve_collective_axes(axis, local_type)
+                collective_axes = resolved_axes or [axis]
+                global_collective_axes = [
+                    ax for ax in collective_axes if self._is_global_axis(ax)
+                ]
+                if global_collective_axes and len(global_collective_axes) != len(
+                    collective_axes
+                ):
+                    global_axis_set = set(global_collective_axes)
+                    local_collective_axes = [
+                        ax for ax in collective_axes if ax not in global_axis_set
+                    ]
+                    local_names = ", ".join(
+                        format_axis(ax) for ax in local_collective_axes
+                    )
+                    global_names = ", ".join(
+                        format_axis(ax) for ax in global_collective_axes
+                    )
+                    raise SpmdTypeError(
+                        f"Collective axis {format_axis(axis)} spans mesh axes with "
+                        f"mixed typechecking policies: local axes ({local_names}) "
+                        f"and global axes ({global_names}). Pass a collective axis "
+                        f"whose component axes are all local or all global."
+                    )
 
                 if resolved_axes is not None:
                     # Validate input types on all resolved axes
@@ -2775,7 +2823,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         output_type[ax] = local_dst
                 _set_local_type(result, output_type)
 
-                if _state._is_global():
+                if global_collective_axes:
                     input_spec = get_partition_spec(x)
                     # Find S(dim) for this axis in the input spec, validating
                     # it is innermost in its multi-axis group.
@@ -2917,15 +2965,16 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     )
 
                 # Stage 3: global shard propagation.
-                if self._local:
-                    global_shard_axes, shard_edges = [], {}
-                else:
-                    all_axes: set[DeviceMeshAxis] = set()
-                    for typ in input_types_list:
-                        all_axes.update(typ.keys())
+                all_axes: set[MeshAxis] = set()
+                for typ in input_types_list:
+                    all_axes.update(typ.keys())
+                global_axes = self._global_axes_for(all_axes)
+                if global_axes:
                     global_shard_axes, shard_edges = _collect_shard_axes(
-                        partition_specs, all_axes
+                        partition_specs, global_axes
                     )
+                else:
+                    global_shard_axes, shard_edges = [], {}
 
                 # Validate mutation safety for in-place/out operations.
                 mutated = _get_mutated_tensors(func, args, kwargs, result)
