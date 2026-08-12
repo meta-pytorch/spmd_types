@@ -55,6 +55,7 @@ from spmd_types._type_attr import get_local_type
 from spmd_types.runtime import (  # noqa: F401
     _LOCAL_AUTOGRAD_FUNCTIONS,
     _PARTITION_SPEC_ATTR,
+    _run_autograd_spmd_typecheck,
     _set_local_type,
     _set_partition_spec,
     _TRACE,
@@ -2455,10 +2456,9 @@ from spmd_types._state import is_type_checking  # noqa: E402, F401
 # Set of autograd.Function subclasses whose apply is known to be local-only
 # (i.e., each output element depends only on the corresponding input elements
 # so the standard element-wise type propagation rule is safe).
-# Set of autograd.Function subclasses registered with a typecheck_forward
-# staticmethod.  When .apply() is intercepted by __torch_function__,
-# typecheck_forward is called INSTEAD of .apply().  It should assert_type()
-# on inputs, call .apply() to execute, and assert_type() on the output.
+# Set of autograd.Function subclasses registered with custom typechecking.
+# Legacy typecheck_forward wrappers execute the function themselves, while
+# spmd_typecheck runs after the real apply call managed by the checker.
 
 
 # The original C++ descriptor for autograd.Function.apply, saved when the
@@ -2707,17 +2707,22 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         is_global_axis=self._is_global_axis,
                     )
 
-            # Typecheck-registered autograd function: dispatch to typecheck_forward
-            # INSTEAD of executing func.  The mode is popped off the
+            # Typecheck-registered autograd function. The mode is popped off the
             # TorchFunctionMode stack during __torch_function__ dispatch (via
-            # _pop_mode_temporarily in torch/overrides.py), so .apply() called
-            # inside typecheck_forward executes normally without re-entering
-            # this method.
+            # _pop_mode_temporarily in torch/overrides.py), so the real apply
+            # executes normally without re-entering this method.
             autograd_cls = _get_autograd_function_class(func)
             if (
                 autograd_cls is not None
                 and autograd_cls in _TYPECHECK_AUTOGRAD_FUNCTIONS
             ):
+                if getattr(autograd_cls, "spmd_typecheck", None):
+                    if kwargs:
+                        raise TypeError(
+                            f"{autograd_cls.__name__}.apply() accepts positional "
+                            "arguments only"
+                        )
+                    return _run_autograd_spmd_typecheck(autograd_cls, func, args)
                 return autograd_cls.typecheck_forward(*args, **kwargs)
 
             # DTensor tracks its own placement metadata; the SPMD type checker
@@ -2911,7 +2916,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         f"for type propagation, and provide "
                         f"register_autograd_function("
                         f"{autograd_cls.__name__}) for a custom "
-                        f"typecheck_forward."
+                        f"typecheck rule."
                     )
                 return result
 

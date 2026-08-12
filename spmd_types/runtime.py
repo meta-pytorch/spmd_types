@@ -25,6 +25,7 @@ need the annotation APIs.
 from __future__ import annotations
 
 import builtins
+import inspect
 import logging
 import os
 from contextlib import AbstractContextManager, contextmanager
@@ -733,9 +734,30 @@ def mutate_type(
 
 # Sets of autograd.Function subclasses registered for type checking.
 # _LOCAL_AUTOGRAD_FUNCTIONS: element-wise / local-only functions.
-# _TYPECHECK_AUTOGRAD_FUNCTIONS: functions with custom typecheck_forward.
+# _TYPECHECK_AUTOGRAD_FUNCTIONS: functions with custom typechecking.
 _LOCAL_AUTOGRAD_FUNCTIONS: set[type] = set()
 _TYPECHECK_AUTOGRAD_FUNCTIONS: set[type] = set()
+
+
+def _run_autograd_spmd_typecheck(
+    cls: type,
+    func: Callable[..., object],
+    args: tuple[object, ...],
+) -> object:
+    signature = inspect.signature(cls.forward)
+    has_ctx = cls.setup_context is torch.autograd.Function.setup_context
+    bound = signature.bind(*(args if not has_ctx else (None, *args)))
+    bound.apply_defaults()
+    forward_args = dict(bound.arguments)
+    if has_ctx:
+        forward_args.pop(next(iter(signature.parameters)))
+
+    outputs = func(*args)
+    hook = cls.spmd_typecheck
+    names = tuple(inspect.signature(hook).parameters)[1:]
+    hook(outputs, **{name: forward_args[name] for name in names})
+
+    return outputs
 
 
 def register_local_autograd_function(cls: type) -> type:
@@ -745,7 +767,7 @@ def register_local_autograd_function(cls: type) -> type:
     generally, does not rearrange data across the tensor in a way that would
     change its sharding type).  It must NOT perform any collectives or
     cross-device communication.  For functions that do, use
-    :func:`register_autograd_function` with a ``typecheck_forward`` method instead.
+    :func:`register_autograd_function` with custom typechecking instead.
 
     Registered functions get the standard local type propagation rule when
     type checking is active:
@@ -777,11 +799,9 @@ def register_autograd_function(cls: type) -> type:
     non-trivial type transformations where the default local-only rule
     would produce incorrect output types.
 
-    The class must define a ``typecheck_forward`` staticmethod that receives
-    the same positional/keyword arguments as ``.apply()``.  Inside, it should
-    call ``assert_type`` on inputs, call ``.apply()`` to run the function,
-    then call ``assert_type`` on the output.  This is symmetric with
-    ``typecheck_forward`` on ``nn.Module`` subclasses in llama4x::
+    A class may define an ``spmd_typecheck`` staticmethod.  The hook runs after
+    the registered function, receives its exact return value as the first
+    argument, and names only the forward arguments it needs::
 
         @register_autograd_function
         class MyCollectiveOp(torch.autograd.Function):
@@ -790,21 +810,37 @@ def register_autograd_function(cls: type) -> type:
                 return x + y
 
             @staticmethod
-            def typecheck_forward(x, y):
+            def spmd_typecheck(outputs, *, x):
                 assert_type(x, {pg: S(-1)})
-                out = MyCollectiveOp.apply(x, y)
-                assert_type(out, {pg: R})
-                return out
+                assert_type_like(outputs, x, {pg: R})
 
             @staticmethod
             def backward(ctx, g):
                 return g, g
+
+    The legacy ``typecheck_forward`` wrapper remains supported for existing
+    registrations, but cannot be combined with ``spmd_typecheck``.
     """
-    if not callable(getattr(cls, "typecheck_forward", None)):
+    legacy_hook = getattr(cls, "typecheck_forward", None)
+    spmd_typecheck = getattr(cls, "spmd_typecheck", None)
+
+    if legacy_hook is not None and spmd_typecheck is not None:
         raise TypeError(
-            f"{cls.__name__} must define a typecheck_forward staticmethod "
+            f"{cls.__name__} cannot define typecheck_forward together with "
+            "spmd_typecheck"
+        )
+    if legacy_hook is None and spmd_typecheck is None:
+        raise TypeError(
+            f"{cls.__name__} must define typecheck_forward or spmd_typecheck "
             f"when using @register_autograd_function"
         )
+    for hook_name, hook in (
+        ("typecheck_forward", legacy_hook),
+        ("spmd_typecheck", spmd_typecheck),
+    ):
+        if hook is not None and not callable(hook):
+            raise TypeError(f"{cls.__name__}.{hook_name} must be callable")
+
     _TYPECHECK_AUTOGRAD_FUNCTIONS.add(cls)
     return cls
 

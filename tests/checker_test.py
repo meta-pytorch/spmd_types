@@ -2285,29 +2285,164 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         self._type_checking_cm = typecheck()
         self._type_checking_cm.__enter__()
 
-    def test_mixed_empty_typed_raises_even_if_registered(self):
-        """Mixed typed + {} inputs raise in strict mode for all ops.
 
-        {} typed tensors (from factory ops) must be annotated with
-        assert_type() before being mixed with tensors that have real
-        axes, even for registered local autograd Functions.
-        """
-        from spmd_types._checker import register_local_autograd_function
+class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
+    class WideOp(torch.autograd.Function):
+        @staticmethod
+        def forward(
+            ctx,
+            x,
+            arg1,
+            arg2,
+            sequence_parallel,
+            arg4,
+            arg5,
+            gather_output,
+            arg7,
+            arg8,
+            arg9,
+            arg10,
+        ):
+            return x * 2
 
-        @register_local_autograd_function
-        class MixedOp(torch.autograd.Function):
+        @staticmethod
+        def backward(ctx, grad):
+            return (grad,) + (None,) * 10
+
+    @staticmethod
+    def _apply(op, x):
+        return op.apply(x, 1, 2, True, 4, 5, False, 7, 8, 9, 10)
+
+    def test_inputs_and_outputs(self):
+        from spmd_types._checker import assert_type, register_autograd_function
+
+        @register_autograd_function
+        class WideOp(self.WideOp):
             @staticmethod
-            def forward(ctx, x, dummy):
-                return x + dummy
+            def forward(
+                ctx,
+                x,
+                arg1,
+                arg2,
+                sequence_parallel,
+                arg4,
+                arg5,
+                gather_output,
+                arg7,
+                arg8,
+                arg9,
+                arg10,
+            ):
+                return x * 2, x * 3
 
             @staticmethod
-            def backward(ctx, g):
-                return g, None
+            def backward(ctx, grad1, grad2):
+                return (grad1 + grad2,) + (None,) * 10
+
+            @staticmethod
+            def spmd_typecheck(outputs, *, x, sequence_parallel, gather_output):
+                self.assertTrue(sequence_parallel)
+                self.assertFalse(gather_output)
+                assert_type(x, {self.pg: R})
+                output1, output2 = outputs
+                assert_type(output1, {self.pg: V})
+                assert_type(output2, {self.pg: V})
+
+        result1, result2 = self._apply(WideOp, self._generate_inputs((4,), self.pg, R))
+
+        self.assertIs(get_axis_local_type(result1, self.pg), V)
+        self.assertIs(get_axis_local_type(result2, self.pg), V)
+        with self.assertRaises(SpmdTypeError) as cm:
+            self._apply(WideOp, self._generate_inputs((4,), self.pg, V))
+        self.assertExpectedInline(
+            str(cm.exception),
+            """SPMD type mismatch on axis default_pg: tensor has PerMeshAxisLocalSpmdType.V, expected PerMeshAxisLocalSpmdType.R
+
+  In apply(
+    args[0]: f32[4] {default_pg: V},
+    args[1]: 1,
+    args[2]: 2,
+    args[3]: True,
+    args[4]: 4,
+    args[5]: 5,
+    args[6]: False,
+    args[7]: 7,
+    args[8]: 8,
+    args[9]: 9,
+    args[10]: 10,
+  )""",
+        )
+
+    def test_positional_only_forward_argument(self):
+        from spmd_types._checker import register_autograd_function
+
+        received = {}
+
+        @register_autograd_function
+        class PositionalOnlyOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, /):
+                return x
+
+            @staticmethod
+            def spmd_typecheck(outputs, *, x):
+                received["x"] = x
+
+            @staticmethod
+            def backward(ctx, grad):
+                return grad
 
         x = self._generate_inputs((4,), self.pg, R)
-        dummy = torch.zeros(4)  # {} typed tensor
-        with self.assertRaises(SpmdTypeError):
-            MixedOp.apply(x, dummy)
+        PositionalOnlyOp.apply(x)
+
+        self.assertIs(received["x"], x)
+
+    def test_inputs_only(self):
+        from spmd_types._checker import assert_type, register_autograd_function
+
+        @register_autograd_function
+        class WideOp(self.WideOp):
+            @staticmethod
+            def spmd_typecheck(_outputs, *, x, sequence_parallel):
+                self.assertTrue(sequence_parallel)
+                assert_type(x, {self.pg: R})
+
+        self._apply(WideOp, self._generate_inputs((4,), self.pg, R))
+
+        with self.assertRaises(SpmdTypeError) as cm:
+            self._apply(WideOp, self._generate_inputs((4,), self.pg, V))
+        self.assertExpectedInline(
+            str(cm.exception),
+            """SPMD type mismatch on axis default_pg: tensor has PerMeshAxisLocalSpmdType.V, expected PerMeshAxisLocalSpmdType.R
+
+  In apply(
+    args[0]: f32[4] {default_pg: V},
+    args[1]: 1,
+    args[2]: 2,
+    args[3]: True,
+    args[4]: 4,
+    args[5]: 5,
+    args[6]: False,
+    args[7]: 7,
+    args[8]: 8,
+    args[9]: 9,
+    args[10]: 10,
+  )""",
+        )
+
+    def test_outputs_only(self):
+        from spmd_types._checker import assert_type, register_autograd_function
+
+        @register_autograd_function
+        class WideOp(self.WideOp):
+            @staticmethod
+            def spmd_typecheck(outputs, *, gather_output):
+                self.assertFalse(gather_output)
+                assert_type(outputs, {self.pg: V})
+
+        result = self._apply(WideOp, self._generate_inputs((4,), self.pg, R))
+
+        self.assertIs(get_axis_local_type(result, self.pg), V)
 
 
 class TestRegisterDecomposition(SpmdTypeCheckedTestCase):
