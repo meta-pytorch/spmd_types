@@ -18,10 +18,12 @@ motivates the exact shape.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import torch
 import torch.utils.hooks as _torch_hooks
+from spmd_types._local_registration import (  # noqa: F401
+    _LOCAL_BACKWARD_HOOKS,
+    register_local_backward_hook,
+)
 from spmd_types._state import is_type_checking
 from spmd_types.runtime import (
     _set_partition_spec,
@@ -30,20 +32,6 @@ from spmd_types.runtime import (
 )
 from spmd_types.types import SpmdTypeError
 from torch.nn.modules._functions import BackwardHookFunction
-
-_LOCAL_BACKWARD_HOOKS: set[Callable] = set()
-
-
-def register_local_backward_hook(fn: Callable) -> Callable:
-    """Declare that ``fn`` does not alter SPMD types when it runs in backward.
-
-    Analogous to :func:`register_local_autograd_function`: the hook's backward
-    is treated as local (no collectives, no type-changing effects on grads).
-    Side-agnostic: covers both ``register_full_backward_hook`` (post) and
-    ``register_full_backward_pre_hook`` (pre) use.  Usable as a decorator.
-    """
-    _LOCAL_BACKWARD_HOOKS.add(fn)
-    return fn
 
 
 def _validate(hooks):

@@ -36,6 +36,10 @@ from spmd_types._collectives import (
     reduce_scatter,
 )
 from spmd_types._local import convert, invariant_to_replicate, reinterpret
+from spmd_types._local_registration import (
+    _LOCAL_AUTOGRAD_FUNCTIONS,
+    register_local_autograd_function,
+)
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._reinterpret_mesh import (  # noqa: F401
     _format_arg_for_context,
@@ -53,7 +57,6 @@ from spmd_types._state import _current_mode, _set_current_mode, current_mesh
 from spmd_types._traceback import _filter_and_reraise
 from spmd_types._type_attr import get_local_type
 from spmd_types.runtime import (  # noqa: F401
-    _LOCAL_AUTOGRAD_FUNCTIONS,
     _PARTITION_SPEC_ATTR,
     _run_autograd_spmd_typecheck,
     _set_local_type,
@@ -72,7 +75,6 @@ from spmd_types.runtime import (  # noqa: F401
     no_typecheck,
     register_autograd_function,
     register_decomposition,
-    register_local_autograd_function,
     trace,
 )
 from spmd_types.types import (

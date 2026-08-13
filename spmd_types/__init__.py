@@ -7,9 +7,6 @@
 # spmd_types package
 from __future__ import annotations
 
-from spmd_types._backward_hooks import (  # noqa: F401
-    register_local_backward_hook,
-)
 from spmd_types._collectives import (  # noqa: F401
     all_gather,
     all_reduce,
@@ -29,6 +26,10 @@ from spmd_types._local import (  # noqa: F401
     invariant_to_replicate,
     reinterpret,
     shard,
+)
+from spmd_types._local_registration import (  # noqa: F401
+    register_local_autograd_function,
+    register_local_backward_hook,
 )
 from spmd_types._mesh import set_current_mesh  # noqa: F401
 from spmd_types._mesh_axis import MeshAxis  # noqa: F401
@@ -64,7 +65,6 @@ from spmd_types.runtime import (  # noqa: F401
     no_typecheck,
     register_autograd_function,
     register_decomposition,
-    register_local_autograd_function,
     trace,
 )
 

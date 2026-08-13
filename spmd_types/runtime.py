@@ -33,6 +33,9 @@ from typing import Any, Callable, overload, TypeAlias
 
 import torch
 from spmd_types._frame import _get_user_frame
+from spmd_types._local_registration import (  # noqa: F401
+    register_local_autograd_function,
+)
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
 from spmd_types._state import _no_typecheck_context, current_mesh, is_type_checking
@@ -732,10 +735,7 @@ def mutate_type(
 # Autograd function registration
 # =============================================================================
 
-# Sets of autograd.Function subclasses registered for type checking.
-# _LOCAL_AUTOGRAD_FUNCTIONS: element-wise / local-only functions.
-# _TYPECHECK_AUTOGRAD_FUNCTIONS: functions with custom typechecking.
-_LOCAL_AUTOGRAD_FUNCTIONS: set[type] = set()
+# Autograd.Function subclasses with custom typechecking.
 _TYPECHECK_AUTOGRAD_FUNCTIONS: set[type] = set()
 
 
@@ -758,38 +758,6 @@ def _run_autograd_spmd_typecheck(
     hook(outputs, **{name: forward_args[name] for name in names})
 
     return outputs
-
-
-def register_local_autograd_function(cls: type) -> type:
-    """Register an autograd.Function subclass as local-only for SPMD type checking.
-
-    Local-only means the function's forward operates element-wise (or more
-    generally, does not rearrange data across the tensor in a way that would
-    change its sharding type).  It must NOT perform any collectives or
-    cross-device communication.  For functions that do, use
-    :func:`register_autograd_function` with custom typechecking instead.
-
-    Registered functions get the standard local type propagation rule when
-    type checking is active:
-
-    - Inputs may freely mix R and V types; the output is R unless any input
-      is V, in which case it is V.
-    - All-I inputs produce I outputs.
-    - R/V and I cannot be mixed.
-    - P is forbidden.
-
-    Unregistered autograd functions that reach the type checker will leave
-    their outputs untyped (or raise in strict mode), since the checker
-    cannot know whether the function is safe for automatic type propagation.
-
-    Can be used as a decorator::
-
-        @register_local_autograd_function
-        class MyOp(torch.autograd.Function):
-            ...
-    """
-    _LOCAL_AUTOGRAD_FUNCTIONS.add(cls)
-    return cls
 
 
 def register_autograd_function(cls: type) -> type:
