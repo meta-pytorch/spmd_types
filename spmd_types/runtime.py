@@ -760,6 +760,14 @@ def _run_autograd_spmd_typecheck(
     return outputs
 
 
+def _get_autograd_spmd_typecheck(cls: type) -> Callable[..., object] | None:
+    """Return and validate an autograd.Function's SPMD typecheck hook."""
+    hook = getattr(cls, "spmd_typecheck", None)
+    if hook is not None and not callable(hook):
+        raise TypeError(f"{cls.__name__}.spmd_typecheck must be callable")
+    return hook
+
+
 def register_autograd_function(cls: type) -> type:
     """Register an autograd.Function subclass with a custom typecheck method.
 
@@ -767,11 +775,11 @@ def register_autograd_function(cls: type) -> type:
     non-trivial type transformations where the default local-only rule
     would produce incorrect output types.
 
-    A class may define an ``spmd_typecheck`` staticmethod.  The hook runs after
-    the registered function, receives its exact return value as the first
+    A class may define an ``spmd_typecheck`` staticmethod. Its presence is
+    detected automatically, so new classes do not need this decorator. The
+    hook runs after the function, receives its exact return value as the first
     argument, and names only the forward arguments it needs::
 
-        @register_autograd_function
         class MyCollectiveOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x, y):
@@ -790,7 +798,7 @@ def register_autograd_function(cls: type) -> type:
     registrations, but cannot be combined with ``spmd_typecheck``.
     """
     legacy_hook = getattr(cls, "typecheck_forward", None)
-    spmd_typecheck = getattr(cls, "spmd_typecheck", None)
+    spmd_typecheck = _get_autograd_spmd_typecheck(cls)
 
     if legacy_hook is not None and spmd_typecheck is not None:
         raise TypeError(
@@ -802,12 +810,8 @@ def register_autograd_function(cls: type) -> type:
             f"{cls.__name__} must define typecheck_forward or spmd_typecheck "
             f"when using @register_autograd_function"
         )
-    for hook_name, hook in (
-        ("typecheck_forward", legacy_hook),
-        ("spmd_typecheck", spmd_typecheck),
-    ):
-        if hook is not None and not callable(hook):
-            raise TypeError(f"{cls.__name__}.{hook_name} must be callable")
+    if legacy_hook is not None and not callable(legacy_hook):
+        raise TypeError(f"{cls.__name__}.typecheck_forward must be callable")
 
     _TYPECHECK_AUTOGRAD_FUNCTIONS.add(cls)
     return cls

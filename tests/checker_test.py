@@ -2314,9 +2314,8 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
         return op.apply(x, 1, 2, True, 4, 5, False, 7, 8, 9, 10)
 
     def test_inputs_and_outputs(self):
-        from spmd_types._checker import assert_type, register_autograd_function
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class WideOp(self.WideOp):
             @staticmethod
             def forward(
@@ -2374,11 +2373,8 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
         )
 
     def test_positional_only_forward_argument(self):
-        from spmd_types._checker import register_autograd_function
-
         received = {}
 
-        @register_autograd_function
         class PositionalOnlyOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x, /):
@@ -2398,9 +2394,8 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
         self.assertIs(received["x"], x)
 
     def test_inputs_only(self):
-        from spmd_types._checker import assert_type, register_autograd_function
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class WideOp(self.WideOp):
             @staticmethod
             def spmd_typecheck(_outputs, *, x, sequence_parallel):
@@ -2431,9 +2426,8 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
         )
 
     def test_outputs_only(self):
-        from spmd_types._checker import assert_type, register_autograd_function
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class WideOp(self.WideOp):
             @staticmethod
             def spmd_typecheck(outputs, *, gather_output):

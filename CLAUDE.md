@@ -73,10 +73,11 @@ registrations.
 - Use `register_local_autograd_function(cls)` for ops that do NOT communicate
   (no collectives). The type checker infers output types from input types using
   the standard non-comms typing rules.
-- Use `register_autograd_function(cls)` with an `spmd_typecheck` staticmethod
-  for ops that DO communicate (internal collectives like all-gather,
-  all-reduce). The hook runs after the real op, receives its exact return value
-  as the first argument, and names only the forward arguments it needs.
+- Define an `spmd_typecheck` staticmethod for ops that DO communicate (internal
+  collectives like all-gather, all-reduce). The hook is detected automatically,
+  runs after the real op, receives its exact return value as the first argument,
+  and names only the forward arguments it needs. `register_autograd_function`
+  remains supported for legacy `typecheck_forward` wrappers.
 - The legacy `typecheck_forward` wrapper remains supported for existing code.
   It must validate input types, run the op under `no_typecheck()`, stamp the
   correct output type, and return the output.

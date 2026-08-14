@@ -36,7 +36,7 @@ from spmd_types._collectives import (
     reduce_scatter,
 )
 from spmd_types._local import convert, invariant_to_replicate, reinterpret
-from spmd_types._local_registration import (
+from spmd_types._local_registration import (  # noqa: F401
     _LOCAL_AUTOGRAD_FUNCTIONS,
     register_local_autograd_function,
 )
@@ -57,6 +57,7 @@ from spmd_types._state import _current_mode, _set_current_mode, current_mesh
 from spmd_types._traceback import _filter_and_reraise
 from spmd_types._type_attr import get_local_type
 from spmd_types.runtime import (  # noqa: F401
+    _get_autograd_spmd_typecheck,
     _PARTITION_SPEC_ATTR,
     _run_autograd_spmd_typecheck,
     _set_local_type,
@@ -2714,18 +2715,17 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
             # _pop_mode_temporarily in torch/overrides.py), so the real apply
             # executes normally without re-entering this method.
             autograd_cls = _get_autograd_function_class(func)
-            if (
-                autograd_cls is not None
-                and autograd_cls in _TYPECHECK_AUTOGRAD_FUNCTIONS
-            ):
-                if getattr(autograd_cls, "spmd_typecheck", None):
+            if autograd_cls is not None:
+                spmd_typecheck = _get_autograd_spmd_typecheck(autograd_cls)
+                if spmd_typecheck is not None:
                     if kwargs:
                         raise TypeError(
                             f"{autograd_cls.__name__}.apply() accepts positional "
                             "arguments only"
                         )
                     return _run_autograd_spmd_typecheck(autograd_cls, func, args)
-                return autograd_cls.typecheck_forward(*args, **kwargs)
+                if autograd_cls in _TYPECHECK_AUTOGRAD_FUNCTIONS:
+                    return autograd_cls.typecheck_forward(*args, **kwargs)
 
             # DTensor tracks its own placement metadata; the SPMD type checker
             # should not interfere with DTensor operations.  This covers
@@ -2915,9 +2915,8 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         f"checking. Use "
                         f"{register_local_autograd_function.__name__}("
                         f"{autograd_cls.__name__}) to mark it as safe "
-                        f"for type propagation, and provide "
-                        f"register_autograd_function("
-                        f"{autograd_cls.__name__}) for a custom "
+                        f"for type propagation, or define "
+                        f"{autograd_cls.__name__}.spmd_typecheck for a custom "
                         f"typecheck rule."
                     )
                 return result
