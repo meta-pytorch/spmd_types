@@ -48,3 +48,10 @@ quote-style = "double"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["*_test.py"]
+
+[tool.test-selector.extra-deps]
+
+# BEGIN GENERATED buck-manual-deps -- do not edit by hand
+# Regenerate: export_buck_manual_deps.py
+"spmd_types/__init__.py" = ["../ops/interfaces/gemm/gemm.py"]
+# END GENERATED buck-manual-deps
