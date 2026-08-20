@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 import torch
+import torch.distributed._functional_collectives as funcol
 from spmd_types import _dist
 from spmd_types._dtype_utils import (
     _apply_op_dtype,
@@ -67,8 +68,9 @@ class _AllReduce(torch.autograd.Function):
             ctx.mark_dirty(x)
             result = x
         else:
-            result = x.clone()
-            _dist.dist.all_reduce(result, op=_dist.dist.ReduceOp.SUM, group=pg)
+            result = funcol.all_reduce(x, "sum", pg)
+            if isinstance(result, funcol.AsyncCollectiveTensor):
+                result = result.wait()
         if inplace:
             assert dtype_options.out_dtype == result.dtype
             return result
@@ -300,16 +302,9 @@ class _AllGatherShard(torch.autograd.Function):
         x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
         x = x.contiguous()
-        world_size = _dist.dist.get_world_size(pg)
-        out_shape = list(x.shape)
-        out_shape[0] *= world_size
-        out = torch.empty(out_shape, device=x.device, dtype=x.dtype)
-        _dist.dist.all_gather_into_tensor(out, x, group=pg)
-        if gather_dim == 0:
-            result = out
-        else:
-            chunks = out.chunk(world_size, dim=0)
-            result = torch.cat(chunks, dim=gather_dim)
+        result = funcol.all_gather_tensor(x, gather_dim, pg)
+        if isinstance(result, funcol.AsyncCollectiveTensor):
+            result = result.wait()
         return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod
@@ -635,22 +630,9 @@ class _ReduceScatterShard(torch.autograd.Function):
         ctx.backward_options = dtype_options.backward_options
         x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
-        world_size = _dist.dist.get_world_size(pg)
-        # reduce_scatter_tensor always scatters along dim 0, so we
-        # movedim before/after when scatter_dim != 0.
-        needs_permute = scatter_dim != 0
-        if needs_permute:
-            x = x.movedim(scatter_dim, 0).contiguous()
-
-        output_shape = list(x.shape)
-        output_shape[0] //= world_size
-        result = x.new_empty(output_shape)
-        _dist.dist.reduce_scatter_tensor(
-            result, x, op=_dist.dist.ReduceOp.SUM, group=pg
-        )
-
-        if needs_permute:
-            result = result.movedim(0, scatter_dim)
+        result = funcol.reduce_scatter_tensor(x, "sum", scatter_dim, pg)
+        if isinstance(result, funcol.AsyncCollectiveTensor):
+            result = result.wait()
         return _apply_out_dtype(result, dtype_options.out_dtype)
 
     @staticmethod

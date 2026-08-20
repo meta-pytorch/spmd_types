@@ -276,6 +276,31 @@ class TestReduceScatter(LocalTensorTestCase):
             )
         self.assertIs(get_axis_local_type(result, self.pg), V)
 
+    def test_reduce_scatter_to_shard_dim_1(self):
+        """reduce_scatter supports scattering on a non-first dimension."""
+        x = self.rank_map(
+            lambda r: (
+                torch.arange(2 * self.WORLD_SIZE, dtype=torch.float).reshape(
+                    2, self.WORLD_SIZE
+                )
+                + r
+            )
+        )
+        assert_type(x, {self.pg: P})
+
+        with typecheck():
+            result = reduce_scatter(x, self.pg, src=P, dst=S(1))
+
+        for r in range(self.WORLD_SIZE):
+            expected = torch.stack(
+                [
+                    x._local_tensors[src_rank][:, r : r + 1]
+                    for src_rank in range(self.WORLD_SIZE)
+                ]
+            ).sum(dim=0)
+            torch.testing.assert_close(result._local_tensors[r], expected)
+        self.assertIs(get_axis_local_type(result, self.pg), V)
+
     def test_reduce_scatter_invalid_src(self):
         """reduce_scatter only accepts P (or V, which is auto-reinterpreted) src."""
         x = self._generate_inputs((6,), self.pg, R)
@@ -289,6 +314,15 @@ class TestReduceScatter(LocalTensorTestCase):
         with self.assertRaises(ValueError) as ctx:
             reduce_scatter(x, self.pg, src=P, dst=R)
         self.assertIn("must be V or S(i)", str(ctx.exception))
+
+    def test_reduce_scatter_indivisible_size_raises(self):
+        x = self._generate_inputs((7,), self.pg, P)
+        with self.assertRaises(AssertionError) as ctx:
+            reduce_scatter(x, self.pg, src=P, dst=S(0))
+        self.assertExpectedInline(
+            str(ctx.exception),
+            "input dimension 0 (7 must be a multiple of group_size 3)",
+        )
 
 
 class TestAllToAll(LocalTensorTestCase):

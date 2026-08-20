@@ -367,6 +367,38 @@ class TestDynamoCollectives(unittest.TestCase):
         # check_result=False: fake backend's reduce_scatter_tensor is nondeterministic
         _assert_dynamo_ok(self, f, torch.randn(self.WORLD_SIZE * 4), check_result=False)
 
+    def test_collectives_use_functional_ops(self):
+        """Collectives should lower to compiler-matchable functional ops."""
+        pg = self.pg
+        graphs = []
+
+        def backend(graph_module, _example_inputs):
+            graphs.append(graph_module)
+            return graph_module.forward
+
+        def f(shard, partial):
+            return (
+                all_reduce(partial, pg, src=P, dst=R),
+                all_gather(shard, pg, src=S(0), dst=R),
+                reduce_scatter(partial, pg, src=P, dst=S(0)),
+            )
+
+        torch._dynamo.reset()
+        compiled = torch.compile(f, backend=backend, fullgraph=True)
+        compiled(torch.randn(4), torch.randn(self.WORLD_SIZE * 4))
+
+        targets = [
+            str(node.target)
+            for node in graphs[0].graph.nodes
+            if node.op == "call_function"
+        ]
+        self.assertEqual(targets.count("_c10d_functional.all_reduce"), 1)
+        self.assertEqual(targets.count("_c10d_functional.all_gather_into_tensor"), 1)
+        self.assertEqual(targets.count("_c10d_functional.reduce_scatter_tensor"), 1)
+        # Each asynchronous collective needs one wait; none should get a
+        # duplicate explicit wait from the Python wrapper.
+        self.assertEqual(targets.count("_c10d_functional.wait_tensor"), 3)
+
     @unittest.skip("dist.all_to_all is marked as skipped by Dynamo")
     def test_all_to_all_V_V(self):
         """all_to_all(V, V) should trace."""

@@ -91,6 +91,9 @@ def _short_dtype(dt: torch.dtype) -> str:
 
 
 _C10D_MAP = {
+    "_c10d_functional.all_reduce": "all_reduce",
+    "_c10d_functional.all_gather_into_tensor": "all_gather",
+    "_c10d_functional.reduce_scatter_tensor": "reduce_scatter",
     "c10d.allreduce_": "all_reduce",
     "c10d.allgather_": "all_gather",
     "c10d._allgather_base_": "all_gather",
