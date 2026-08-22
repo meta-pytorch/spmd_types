@@ -53,5 +53,5 @@ python_files = ["*_test.py"]
 
 # BEGIN GENERATED buck-manual-deps -- do not edit by hand
 # Regenerate: export_buck_manual_deps.py
-"spmd_types/__init__.py" = ["../ops/interfaces/gemm/gemm.py"]
+"spmd_types/__init__.py" = ["../ops/interfaces/attn/triton_attention_fp32.py", "../ops/interfaces/gemm/gemm.py"]
 # END GENERATED buck-manual-deps
