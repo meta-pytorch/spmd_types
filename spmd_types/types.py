@@ -162,6 +162,9 @@ class PartitionSpec(tuple[PartitionSpecEntry, ...]):
     ):
         return super().__new__(cls, args)
 
+    def __getnewargs__(self) -> tuple[PartitionSpecEntry, ...]:
+        return tuple(self)
+
     def __repr__(self):
         if not self:
             return "PartitionSpec()"

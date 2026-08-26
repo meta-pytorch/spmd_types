@@ -10,6 +10,7 @@ Tests for SPMD type hierarchy (R, I, V, P, S) and PartitionSpec.
 Covers: types.py.
 """
 
+import copy
 import unittest
 
 import expecttest
@@ -277,6 +278,10 @@ class TestPartitionSpecToShardTypes(_NamedMeshAxisTestCase):
 
 class TestNormalizePartitionSpec(_NamedMeshAxisTestCase):
     """Test explicit PartitionSpec normalization."""
+
+    def test_deepcopy_preserves_entries(self):
+        spec = PartitionSpec(("dp", "cp"), None)
+        self.assertEqual(copy.deepcopy(spec), spec)
 
     def test_constructor_preserves_raw_entries(self):
         spec = PartitionSpec("tp", (), ("dp", "cp"))
