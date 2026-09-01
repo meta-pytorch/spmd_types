@@ -34,6 +34,9 @@ Issues = "https://github.com/meta-pytorch/spmd_types/issues"
 [tool.setuptools.packages.find]
 include = ["spmd_types*"]
 
+[tool.setuptools.package-data]
+spmd_types = ["py.typed"]
+
 
 [tool.ruff]
 line-length = 88
