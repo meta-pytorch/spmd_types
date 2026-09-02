@@ -306,6 +306,7 @@ def _infer_local_type_for_axis_raw(  # noqa: C901
     axis_types: list[PerMeshAxisLocalSpmdType],
     out_partial: bool = False,
     linearity: OpLinearity = OpLinearity.NONLINEAR,
+    no_grad: list[bool] | None = None,
 ) -> PerMeshAxisLocalSpmdType:
     """Raw inference logic -- raises plain ``SpmdTypeError`` without suggestions.
 
@@ -317,6 +318,9 @@ def _infer_local_type_for_axis_raw(  # noqa: C901
         axis_types: List of input SPMD types for this axis.
         out_partial: If True, reinterpret the inferred result as Partial.
         linearity: How the op interacts with Partial types.
+        no_grad: Optional list parallel to ``axis_types``; True marks an
+            operand that cannot receive a gradient from this op (it does not
+            require grad, or grad mode is disabled).
     """
     if not axis_types:
         if out_partial:
@@ -324,6 +328,20 @@ def _infer_local_type_for_axis_raw(  # noqa: C901
         raise ValueError(f"No types provided for axis {format_axis(axis)}")
 
     type_set = set(axis_types)
+
+    # R and I differ only in the gradient they accept.  When I is mixed with
+    # other types, an R/I operand that cannot receive a gradient adopts the
+    # flavor of those that can (R if there are none).  The rules below run on
+    # the coerced types; error messages keep reporting the original
+    # ``axis_types``.
+    if no_grad is not None and I in type_set and not type_set <= {I, _Scalar}:
+        fixed = {t for t, ng in zip(axis_types, no_grad) if not ng and t in (R, I)}
+        if len(fixed) <= 1:
+            flavor = I if fixed == {I} else R
+            type_set = {
+                flavor if ng and t in (R, I) else t
+                for t, ng in zip(axis_types, no_grad)
+            }
 
     # Check type compatibility and infer output type.
     #
@@ -422,6 +440,7 @@ def infer_local_type_for_axis(
     axis_types: list[PerMeshAxisLocalSpmdType],
     out_partial: bool = False,
     linearity: OpLinearity = OpLinearity.NONLINEAR,
+    no_grad: list[bool] | None = None,
 ) -> PerMeshAxisLocalSpmdType:
     """
     Infer the output SPMD type for a single mesh axis given input types.
@@ -431,6 +450,9 @@ def infer_local_type_for_axis(
         axis_types: List of input types for this axis
         out_partial: If True, reinterpret the result as Partial
         linearity: How the op interacts with Partial types
+        no_grad: Optional list parallel to ``axis_types`` marking operands
+            that cannot receive a gradient.  Such operands may be typed I
+            while mixing with R (see ``_infer_local_type_for_axis_raw``).
 
     Returns:
         The inferred output type
@@ -440,13 +462,17 @@ def infer_local_type_for_axis(
     """
     axis = normalize_axis(axis)
     try:
-        return _infer_local_type_for_axis_raw(axis, axis_types, out_partial, linearity)
+        return _infer_local_type_for_axis_raw(
+            axis, axis_types, out_partial, linearity, no_grad
+        )
     except SpmdTypeError as e:
         raise SpmdTypeError(
             _format_error_with_suggestions(
                 str(e),
                 axis,
                 axis_types,
+                # Suggestions describe explicit conversions, so they are
+                # evaluated under the strict rule (no no_grad relaxation).
                 lambda a, t: _infer_local_type_for_axis_raw(
                     a, t, out_partial, linearity
                 ),
@@ -755,6 +781,8 @@ def _auto_reinterpret_cross_mesh(
 
 def infer_output_type(  # noqa: C901
     input_types_list: list[LocalSpmdType],
+    *,
+    no_grad: list[bool] | None = None,
     out_partial_axes: set[DeviceMeshAxis] | None = None,
     linearity: OpLinearity = OpLinearity.NONLINEAR,
 ) -> LocalSpmdType:
@@ -772,7 +800,8 @@ def infer_output_type(  # noqa: C901
     - If all operands are V -> output is V
     - If all operands are P -> output is P (linear ops only)
     - Mixed R/V -> output is V
-    - I cannot mix with other types
+    - I cannot mix with other types, unless the R or I operands that cannot
+      receive a gradient (per ``no_grad``) can be read as the other flavor
     - P cannot mix with non-P types
 
     In strict mode, raises ``SpmdTypeError`` when an operand is missing an
@@ -781,6 +810,8 @@ def infer_output_type(  # noqa: C901
 
     Args:
         input_types_list: List of LocalSpmdType dicts, one per operand
+        no_grad: Optional list parallel to ``input_types_list``; True marks
+            an operand that cannot receive a gradient from this op
         out_partial_axes: Optional set of mesh axis names to mark as partial
         linearity: How the op interacts with Partial types
 
@@ -820,6 +851,7 @@ def infer_output_type(  # noqa: C901
     output_type: LocalSpmdType = {}
     for axis in sorted(all_axes, key=lambda ax: format_axis(ax)):
         axis_types = []
+        axis_no_grad: list[bool] = []
         for operand_idx, typ in enumerate(input_types_list):
             if axis not in typ:
                 if strict:
@@ -844,12 +876,18 @@ def infer_output_type(  # noqa: C901
                     )
                 continue  # permissive: skip this operand for this axis
             axis_types.append(typ[axis])
+            if no_grad is not None:
+                axis_no_grad.append(no_grad[operand_idx])
 
         if not axis_types:
             continue  # all operands missing this axis
 
         output_type[axis] = infer_local_type_for_axis(
-            axis, axis_types, out_partial=axis in out_partial_axes, linearity=linearity
+            axis,
+            axis_types,
+            out_partial=axis in out_partial_axes,
+            linearity=linearity,
+            no_grad=axis_no_grad if no_grad is not None else None,
         )
 
     return output_type
@@ -1238,12 +1276,16 @@ class _ArgInfo(NamedTuple):
         partition_specs: PartitionSpec for each tensor (same order as
             tensor_types). None for tensors without a PartitionSpec.
         no_grads: Tensor ids with requires_grad=False
+        tensor_no_grad: Parallel to ``tensor_types``; True when the tensor
+            cannot receive a gradient from this op (requires_grad=False or
+            grad mode disabled).
     """
 
     tensor_types: list[LocalSpmdType]
     raw_entries: list[_RawArgEntry]
     partition_specs: list[PartitionSpec | None]
     no_grads: set[int]
+    tensor_no_grad: list[bool]
 
 
 def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
@@ -1264,11 +1306,14 @@ def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
     raw_entries: list[_RawArgEntry] = []
     partition_specs: list[PartitionSpec | None] = []
     no_grads: set[int] = set()
+    tensor_no_grad: list[bool] = []
+    grad_enabled = torch.is_grad_enabled()
 
     for arg in args:
         for t in _iter_tensors_in(arg):
             tensor_types.append(get_local_type(t))
             partition_specs.append(get_partition_spec(t))
+            tensor_no_grad.append(not (grad_enabled and t.requires_grad))
             if not t.requires_grad:
                 no_grads.add(id(t))
         raw_entries.append(_RawArgEntry(None, arg))
@@ -1281,6 +1326,7 @@ def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
         for t in _iter_tensors_in(v):
             tensor_types.append(get_local_type(t))
             partition_specs.append(get_partition_spec(t))
+            tensor_no_grad.append(not (grad_enabled and t.requires_grad))
         raw_entries.append(_RawArgEntry(key, v))
 
     return _ArgInfo(
@@ -1288,6 +1334,7 @@ def _classify_args(args: tuple, kwargs: dict) -> _ArgInfo:
         raw_entries,
         partition_specs,
         no_grads,
+        tensor_no_grad,
     )
 
 
@@ -2930,10 +2977,13 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     input_types_list, original_args, original_kwargs, spec
                 )
                 # _collect_scalar_types may append entries for typed scalars;
-                # pad partition_specs with None to keep both lists aligned.
+                # pad partition_specs with None (and no_grad with True, since
+                # scalars never receive gradients) to keep the lists aligned.
                 partition_specs = list(info.partition_specs)
+                no_grad = list(info.tensor_no_grad)
                 while len(partition_specs) < len(input_types_list):
                     partition_specs.append(None)
+                    no_grad.append(True)
 
                 # Stage 1: cross-mesh reinterpret.
                 input_types_list, partition_specs = _auto_reinterpret_cross_mesh(
@@ -2967,6 +3017,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                     # shard propagation below may promote local type V to P.
                     output_type = infer_output_type(
                         input_types_list,
+                        no_grad=no_grad,
                         linearity=linearity,
                     )
 

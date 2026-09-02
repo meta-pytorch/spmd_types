@@ -843,10 +843,28 @@ class TestGlobalSpmdInvariant(GlobalSpmdTestCase):
         ),
     )
     def test_i_mixed_rejected(self, op, x_shape, w_shape, x_type, w_type):
-        x = self._make_input(x_shape, self.tp, x_type)
-        w = self._make_input(w_shape, self.tp, w_type)
+        # Both operands require grad: an I operand that cannot receive a
+        # gradient is read as R instead of raising.
+        x = self._make_input(x_shape, self.tp, x_type).requires_grad_(True)
+        w = self._make_input(w_shape, self.tp, w_type).requires_grad_(True)
         with self.assertRaises(SpmdTypeError):
             op(x, w)
+
+    @parametrize(
+        "op,x_shape,w_shape,x_type,w_type,expected",
+        [
+            (torch.add, (4, 3), (4, 3), I, R, R),
+            (torch.mm, (4, 3), (3, 5), I, S(1), S(1)),
+            (torch.mm, (4, 3), (3, 5), S(0), I, S(0)),
+        ],
+        name_fn=lambda op, x_shape, w_shape, x_type, w_type, expected: (
+            f"{op.__name__}_{_type_name(x_type)}_{_type_name(w_type)}"
+        ),
+    )
+    def test_i_mixed_no_grad_ok(self, op, x_shape, w_shape, x_type, w_type, expected):
+        x = self._make_input(x_shape, self.tp, x_type)
+        w = self._make_input(w_shape, self.tp, w_type)
+        self.assertEqual(_get_axis_type(op(x, w), self.tp), expected)
 
 
 instantiate_parametrized_tests(TestGlobalSpmdInvariant)

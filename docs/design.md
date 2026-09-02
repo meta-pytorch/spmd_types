@@ -138,6 +138,9 @@ op(Replicate, Varying) -> Varying
 Partial + Partial -> Partial
 ```
 
+There is a relaxation for operands that cannot receive a gradient; see
+"`torch.no_grad` and types" below.
+
 For n-ary operations involving Partial, only addition (and more generally,
 multilinear operations) can accept multiple Partial arguments.  This is because
 addition distributes over the pending sum: (sum of a) + (sum of b) = sum of (a + b).
@@ -827,13 +830,19 @@ point where a different mesh vocabulary is intended.
 
 When in a no grad region, no gradients flow.  So we do not need to distinguish
 between Replicate and Invariant in this case.  However, because tensors in a
-no grad region can turn into leaf tensors and be used outside of the region,
-we still accurately maintain Replicate/Invariant in this region.  If a tensor
-never will turn into a leaf, this doesn't matter and you can pick whichever
-annotation you want in this case.  SPMD types is substantially less useful
-when you don't do derivatives, but there is some utility in tracking if a
-tensor is varying, replicated or partial across a mesh axis.  If you find this
-isn't useful, you can also just disable SPMD type checking in this region.
+no grad region can turn into leaf tensors and be used outside of the region
+(either because you changed their requires grad, or you did a differentiable
+mutation on them), we still accurately maintain Replicate/Invariant in this
+region.  If a tensor never will turn into a leaf, this doesn't matter and you
+can pick whichever annotation you want in this case.  SPMD types is
+substantially less useful when you don't do derivatives, but there is some
+utility in tracking if a tensor is varying, replicated or partial across a
+mesh axis.  If you find this isn't useful, you can also just disable SPMD type
+checking in this region.
+
+For convenience, if you are SPMD type checking on R/I inputs in
+`torch.no_grad` or that `requires_grad=False`, we will allow mixing, and
+default the output to R if it would otherwise be ambiguous.
 
 ### Mesh stack and `set_current_mesh`
 

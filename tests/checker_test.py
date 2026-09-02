@@ -222,25 +222,37 @@ class TestLinearTypePropagation(SpmdTypeCheckedTestCase):
             x / y
 
     def test_mul_p_typed_scalar(self):
-        """P * Scalar(R) preserves P; other typed Scalars are not valid scaling."""
+        """P * Scalar(R) preserves P; V and P typed Scalars are not valid scaling.
+
+        Scalar(I) is also accepted: a Python scalar never receives a gradient,
+        so its I is read as R.
+        """
         x = self._generate_inputs((4,), self.pg, P)
 
-        result = x * Scalar(2.0, {self.pg: R})
-        self.assertIs(get_axis_local_type(result, self.pg), P)
+        for scalar_type in (R, I):
+            with self.subTest(scalar_type=scalar_type):
+                result = x * Scalar(2.0, {self.pg: scalar_type})
+                self.assertIs(get_axis_local_type(result, self.pg), P)
 
-        for scalar_type in (I, V, P):
+        for scalar_type in (V, P):
             with self.subTest(scalar_type=scalar_type):
                 with self.assertRaises(SpmdTypeError):
                     x * Scalar(2.0, {self.pg: scalar_type})
 
     def test_truediv_p_typed_scalar(self):
-        """P / Scalar(R) preserves P; typed nonlinear denominators are rejected."""
+        """P / Scalar(R) preserves P; typed nonlinear denominators are rejected.
+
+        Scalar(I) is also accepted: a Python scalar never receives a gradient,
+        so its I is read as R.
+        """
         x = self._generate_inputs((4,), self.pg, P)
 
-        result = x / Scalar(2.0, {self.pg: R})
-        self.assertIs(get_axis_local_type(result, self.pg), P)
+        for scalar_type in (R, I):
+            with self.subTest(scalar_type=scalar_type):
+                result = x / Scalar(2.0, {self.pg: scalar_type})
+                self.assertIs(get_axis_local_type(result, self.pg), P)
 
-        for scalar_type in (I, V, P):
+        for scalar_type in (V, P):
             with self.subTest(scalar_type=scalar_type):
                 with self.assertRaises(SpmdTypeError):
                     x / Scalar(2.0, {self.pg: scalar_type})
@@ -883,6 +895,97 @@ Are you missing a collective or a reinterpret/convert call? e.g.,
   convert(tensor, mesh_tp, src=I, dst=R) on the Invariant operand (no-op forward, all-reduce in backward)
   all_reduce(tensor, mesh_tp, src=P, dst=I) on the Partial operand (all-reduce in forward, no-op backward)""",
         )
+
+
+class TestNoGradInvariantMixing(SpmdTypeCheckedTestCase):
+    """I may mix with R when every I operand cannot receive a gradient.
+
+    R and I differ only in the gradient they accept, so an I operand with no
+    gradient edge (requires_grad=False, or grad mode off) is read as R.  The
+    all-I case never reaches the mixing error and stays I.
+    """
+
+    def _typed(self, typ, requires_grad):
+        x = self._generate_inputs((4,), self.pg, typ)
+        if requires_grad:
+            x.requires_grad_(True)
+        return x
+
+    def test_no_grad_I_with_no_grad_R_gives_R(self):
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(R, requires_grad=False)
+        self.assertIs(get_axis_local_type(x + y, self.pg), R)
+
+    def test_no_grad_I_with_grad_R_gives_R(self):
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(R, requires_grad=True)
+        out = x * y
+        self.assertIs(get_axis_local_type(out, self.pg), R)
+        self.assertTrue(out.requires_grad)
+
+    def test_grad_I_with_no_grad_R_gives_I(self):
+        x = self._typed(I, requires_grad=True)
+        y = self._typed(R, requires_grad=False)
+        out = x * y
+        self.assertIs(get_axis_local_type(out, self.pg), I)
+        self.assertTrue(out.requires_grad)
+
+    def test_grad_I_with_no_grad_R_and_grad_V_still_errors(self):
+        # Reading the no-grad R as I does not help once V is present, and the
+        # error reports the original (uncoerced) operand types.
+        x = self._typed(I, requires_grad=True)
+        y = self._typed(R, requires_grad=False)
+        z = self._typed(V, requires_grad=True)
+        with self.assertRaisesRegex(SpmdTypeError, r"cannot mix.*\[I, R, V\]"):
+            torch.addcmul(x, y, z)
+
+    def test_no_grad_I_with_V_gives_V(self):
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(V, requires_grad=True)
+        self.assertIs(get_axis_local_type(x + y, self.pg), V)
+
+    def test_grad_I_with_grad_R_still_errors(self):
+        x = self._typed(I, requires_grad=True)
+        y = self._typed(R, requires_grad=True)
+        with self.assertRaisesRegex(SpmdTypeError, "cannot mix"):
+            x + y
+
+    def test_grad_disabled_relaxes_grad_I_with_grad_R(self):
+        x = self._typed(I, requires_grad=True)
+        y = self._typed(R, requires_grad=True)
+        with torch.no_grad():
+            self.assertIs(get_axis_local_type(x + y, self.pg), R)
+
+    def test_all_no_grad_I_stays_I(self):
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(I, requires_grad=False)
+        self.assertIs(get_axis_local_type(x + y, self.pg), I)
+
+    def test_no_grad_I_with_P_linear_still_errors(self):
+        # I is read as R, and P + R is a forward-semantic error.
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(P, requires_grad=False)
+        with self.assertRaisesRegex(SpmdTypeError, "Partial"):
+            x + y
+
+    def test_no_grad_I_with_P_multilinear_gives_P(self):
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(P, requires_grad=False)
+        self.assertIs(get_axis_local_type(x * y, self.pg), P)
+
+    def test_inplace_cannot_flip_I_to_R(self):
+        # Stamps never change on mutation, even for no-grad tensors: aliases
+        # would otherwise disagree about the gradient contract.
+        x = self._typed(I, requires_grad=False)
+        y = self._typed(R, requires_grad=False)
+        with self.assertRaisesRegex(SpmdTypeError, "in-place/out operation"):
+            x.add_(y)
+
+    def test_inplace_R_target_with_no_grad_I_input(self):
+        x = self._typed(R, requires_grad=False)
+        y = self._typed(I, requires_grad=False)
+        x.add_(y)
+        self.assertIs(get_axis_local_type(x, self.pg), R)
 
 
 class TestOpLinearity(LocalTensorTestCase):
@@ -1566,10 +1669,16 @@ class TestScalarWrapper(SpmdTypeCheckedTestCase):
 
     def test_add_i_scalar_v_error(self):
         """torch.add(I, Scalar(V)) -> SpmdTypeError (I can't mix)."""
-        x = self._generate_inputs((4,), self.pg, I)
+        x = self._generate_inputs((4,), self.pg, I).requires_grad_(True)
         s = Scalar(1.0, {self.pg: V})
         with self.assertRaises(SpmdTypeError):
             torch.add(x, s)
+
+    def test_add_no_grad_i_scalar_v_gives_v(self):
+        """torch.add(I, Scalar(V)) -> V when the I tensor cannot receive a gradient."""
+        x = self._generate_inputs((4,), self.pg, I)
+        s = Scalar(1.0, {self.pg: V})
+        self.assertIs(get_axis_local_type(torch.add(x, s), self.pg), V)
 
     def test_narrow_r_scalar_v_gives_v(self):
         """torch.narrow(R, dim, Scalar(V), Scalar(V)) -> V.

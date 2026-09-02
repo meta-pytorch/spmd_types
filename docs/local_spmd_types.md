@@ -199,6 +199,12 @@ op(Replicate, Varying) -> Varying
 Partial + Partial -> Partial
 ```
 
+There is a special case for operands that cannot receive a gradient
+(`requires_grad=False` or `torch.no_grad()`): R and I are indistinguishable for
+them.  If mixing R and I would have otherwise errored, such operands take on the
+R/I flavor of the operands that can receive a gradient, defaulting to R when
+there are none.
+
 To summarize:
 
 * You usually need to convert Invariant into Replicate before you
