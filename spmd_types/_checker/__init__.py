@@ -2745,9 +2745,11 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         """Overlay DTensor shard propagation for global-SPMD S(i) axes.
 
         Sets PartitionSpecs on the result and promotes the local type from V
-        to P on axes where DTensor determines the output is Partial.
-        ``output_type`` is updated in place so the caller's trace reflects the
-        promotion.
+        to P on axes where DTensor determines the output is Partial.  The
+        result was already stamped with the local type, so the promotion goes
+        through ``mutate_type`` with ``src=V``, which checks that the tensor
+        really is V on that axis.  ``output_type`` is updated in place so the
+        caller's trace reflects the promotion.
         """
         all_axes: set[MeshAxis] = set()
         for typ in input_types_list:
@@ -2807,9 +2809,19 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         f"expected all P, got {validated_global_result}"
                     )
                     output_type[axis] = P
-                    _set_result_type(result, output_type)
-                    if out is not None:
-                        _set_result_type(out, output_type)
+                    # ``out`` may alias tensors in ``result`` (the out= kwarg
+                    # convention returns the same buffer). Promote each tensor
+                    # once, or mutate_type would see the already-promoted P on
+                    # the second pass and raise on the src=V check.
+                    promoted: set[int] = set()
+                    for t in _iter_tensors_in(result):
+                        if id(t) not in promoted:
+                            promoted.add(id(t))
+                            mutate_type(t, axis, src=V, dst=P)
+                    for t in _iter_tensors_in(out):
+                        if id(t) not in promoted:
+                            promoted.add(id(t))
+                            mutate_type(t, axis, src=V, dst=P)
             _set_result_partition_spec(result, output_specs)
 
     def _typecheck_spmd_function(  # noqa: C901
