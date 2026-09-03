@@ -2263,22 +2263,18 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         result = MultiInputOp.apply(a, b)
         self.assertIs(get_axis_local_type(result, self.pg), R)
 
-    def test_typecheck_forward_sets_output_type(self):
-        """typecheck_forward calls .apply() and sets output type."""
-        from spmd_types._checker import assert_type, register_autograd_function
+    def test_spmd_typecheck_sets_output_type(self):
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class CheckedOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x):
                 return x * 2
 
             @staticmethod
-            def typecheck_forward(x):
+            def spmd_typecheck(output, *, x):
                 assert_type(x, {self.pg: R})
-                out = CheckedOp.apply(x)
-                assert_type(out, {self.pg: R})
-                return out
+                assert_type(output, {self.pg: R})
 
             @staticmethod
             def backward(ctx, g):
@@ -2288,23 +2284,19 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         result = CheckedOp.apply(x)
         self.assertIs(get_axis_local_type(result, self.pg), R)
 
-    def test_typecheck_forward_raises_on_wrong_input(self):
-        """typecheck_forward can validate inputs via assert_type."""
-        from spmd_types._checker import assert_type, register_autograd_function
+    def test_spmd_typecheck_raises_on_wrong_input(self):
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class StrictCheckOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x):
                 return x * 2
 
             @staticmethod
-            def typecheck_forward(x):
+            def spmd_typecheck(output, *, x):
                 # Expects V, but we'll pass R
                 assert_type(x, {self.pg: V})
-                out = StrictCheckOp.apply(x)
-                assert_type(out, {self.pg: V})
-                return out
+                assert_type(output, {self.pg: V})
 
             @staticmethod
             def backward(ctx, g):
@@ -2314,26 +2306,23 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         with self.assertRaises(SpmdTypeError):
             StrictCheckOp.apply(x)
 
-    def test_typecheck_forward_overrides_local_default(self):
-        """register_autograd_function produces different types than local-only.
+    def test_spmd_typecheck_overrides_local_default(self):
+        """spmd_typecheck produces different types than local-only.
 
         The local-only rule for infer_output_type([V, R]) would produce V.
-        typecheck_forward sets R instead (e.g., because the function does an
+        spmd_typecheck sets R instead (e.g., because the function does an
         internal all-reduce).
         """
-        from spmd_types._checker import assert_type, register_autograd_function
+        from spmd_types._checker import assert_type
 
-        @register_autograd_function
         class OverrideOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x, y):
                 return x + y
 
             @staticmethod
-            def typecheck_forward(x, y):
-                out = OverrideOp.apply(x, y)
-                assert_type(out, {self.pg: R})
-                return out
+            def spmd_typecheck(output, *, x, y):
+                assert_type(output, {self.pg: R})
 
             @staticmethod
             def backward(ctx, g):
@@ -2342,28 +2331,24 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
         x = self._generate_inputs((4,), self.pg, V)
         y = self._generate_inputs((4,), self.pg, R)
         result = OverrideOp.apply(x, y)
-        # Local-only rule would give V; typecheck_forward sets R.
+        # Local-only rule would give V; spmd_typecheck sets R.
         self.assertIs(get_axis_local_type(result, self.pg), R)
 
-    def test_typecheck_forward_receives_all_args(self):
-        """typecheck_forward receives tensor and non-tensor args."""
-        from spmd_types._checker import assert_type, register_autograd_function
+    def test_spmd_typecheck_receives_named_args(self):
+        from spmd_types._checker import assert_type
 
         received = {}
 
-        @register_autograd_function
         class ArgsOp(torch.autograd.Function):
             @staticmethod
             def forward(ctx, x, scale):
                 return x * scale
 
             @staticmethod
-            def typecheck_forward(x, scale):
+            def spmd_typecheck(output, *, x, scale):
                 received["x"] = x
                 received["scale"] = scale
-                out = ArgsOp.apply(x, scale)
-                assert_type(out, {self.pg: R})
-                return out
+                assert_type(output, {self.pg: R})
 
             @staticmethod
             def backward(ctx, g):
@@ -2480,6 +2465,48 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
     args[10]: 10,
   )""",
         )
+
+    def test_variadic_forward_arguments(self):
+        from spmd_types._checker import assert_type
+
+        received = {}
+
+        class VariadicOp(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, *inputs):
+                return tuple(input_ * 2 for input_ in inputs)
+
+            @staticmethod
+            def backward(ctx, *grad_outputs):
+                return grad_outputs
+
+            @staticmethod
+            def spmd_typecheck(outputs, *, inputs):
+                received["inputs"] = inputs
+                for output in outputs:
+                    assert_type(output, {self.pg: V})
+
+        x = self._generate_inputs((4,), self.pg, R)
+        y = self._generate_inputs((4,), self.pg, R)
+        outputs = VariadicOp.apply(x, y)
+
+        self.assertIs(received["inputs"][0], x)
+        self.assertIs(received["inputs"][1], y)
+        self.assertEqual(len(outputs), 2)
+        for output in outputs:
+            self.assertIs(get_axis_local_type(output, self.pg), V)
+
+    def test_noop_save_inputs_uses_first_typed_input(self):
+        from torch.utils import checkpoint
+
+        noop_save_inputs = getattr(checkpoint, "_NoopSaveInputs", None)
+        if noop_save_inputs is None:
+            self.skipTest("PyTorch does not expose _NoopSaveInputs")
+
+        x = self._generate_inputs((4,), self.pg, R)
+        output = noop_save_inputs.apply(torch.empty(0), x)
+
+        self.assertIs(get_axis_local_type(output, self.pg), R)
 
     def test_positional_only_forward_argument(self):
         received = {}

@@ -3218,8 +3218,8 @@ class _SpmdTypeBackwardCompatibleMode:
 
 # _NoopSaveInputs (from torch.utils.checkpoint) passes a dummy untyped
 # tensor alongside real model tensors.  It is an identity op that returns
-# its inputs unchanged.  We wrap in no_typecheck to avoid mixed-type
-# errors from the dummy tensor, then copy types from inputs to outputs.
+# its inputs unchanged.  The spmd_typecheck hook runs after the real apply
+# and only copies types from inputs to outputs by position.
 # NOTE: _NoopSaveInputs was removed in newer PyTorch versions.
 _NoopSaveInputs = getattr(
     __import__("torch.utils.checkpoint", fromlist=["_NoopSaveInputs"]),
@@ -3228,12 +3228,10 @@ _NoopSaveInputs = getattr(
 )
 if _NoopSaveInputs is not None:
 
-    def _noop_save_inputs_typecheck_forward(*args, **kwargs):
+    def _noop_save_inputs_spmd_typecheck(result, *, args):
         input_types = [
             get_local_type(a) if isinstance(a, torch.Tensor) else None for a in args
         ]
-        with no_typecheck():
-            result = _NoopSaveInputs.apply(*args, **kwargs)
         # Restore types on outputs by position.
         if isinstance(result, (tuple, list)):
             for r, lt in zip(result, input_types):
@@ -3244,9 +3242,5 @@ if _NoopSaveInputs is not None:
                 if lt:
                     _set_local_type(result, lt)
                     break
-        return result
 
-    _NoopSaveInputs.typecheck_forward = staticmethod(
-        _noop_save_inputs_typecheck_forward
-    )
-    register_autograd_function(_NoopSaveInputs)
+    _NoopSaveInputs.spmd_typecheck = staticmethod(_noop_save_inputs_spmd_typecheck)
