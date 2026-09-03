@@ -637,6 +637,31 @@ class TestGlobalSpmdPointwise(GlobalSpmdTestCase):
         y = self._make_input((4, 3), self.tp, S(0))
         self.assertEqual(_get_axis_type(op(x, y), self.tp), S(0))
 
+    def test_inplace_s0_s0_preserves_partition_spec(self):
+        """x.add_(y) with S(0) operands: the op mutates x in place before the
+        torch-op typing rule classifies its operands, so the rule reads the
+        operands' types and PartitionSpecs post-op.  Those attributes are set
+        only by the checker (not by the raw op), so the re-read must match the
+        pre-op state and the result keeps S(0).
+        """
+        x = self._make_input((4, 3), self.tp, S(0))
+        y = self._make_input((4, 3), self.tp, S(0))
+        x.add_(y)
+        self.assertEqual(_get_axis_type(x, self.tp), S(0))
+        self.assertEqual(get_partition_spec(x), PartitionSpec(self.tp, None))
+
+    def test_out_s0_s0_preserves_partition_spec(self):
+        """torch.add(x, y, out=out) with S(0) operands: the out tensor is
+        mutated in place, and post-op re-classification (which skips out=) must
+        still yield S(0) for the result written into out.
+        """
+        x = self._make_input((4, 3), self.tp, S(0))
+        y = self._make_input((4, 3), self.tp, S(0))
+        out = self._make_input((4, 3), self.tp, S(0))
+        torch.add(x, y, out=out)
+        self.assertEqual(_get_axis_type(out, self.tp), S(0))
+        self.assertEqual(get_partition_spec(out), PartitionSpec(self.tp, None))
+
     @parametrize(
         "op", [torch.add, torch.mul, torch.div], name_fn=lambda op: op.__name__
     )

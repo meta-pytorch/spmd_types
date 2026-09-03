@@ -3073,7 +3073,14 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
             else:
                 self._typecheck_torch_op(
-                    func, result, args, kwargs, original_args, original_kwargs, info
+                    func,
+                    result,
+                    args,
+                    kwargs,
+                    original_args,
+                    original_kwargs,
+                    info.no_grads,
+                    info.tensor_no_grad,
                 )
 
         except SpmdTypeError as e:
@@ -3093,12 +3100,24 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         kwargs: dict,
         original_args: tuple,
         original_kwargs: dict,
-        info: _ArgInfo,
+        no_grads: set[int],
+        tensor_no_grad: list[bool],
     ) -> None:
         """Type a regular torch op (or a registered local autograd Function):
         local rule (or a per-op override) plus in-place validation and global
         shard propagation.
+
+        Receives the raw call and classifies the operands itself, like an
+        ``spmd_typecheck`` hook does.  The dispatcher classifies the same
+        arguments for its own purposes (error context, global-SPMD input
+        validation); that duplication is deliberate so that typing rules take
+        tensors, not pre-digested type lists.  ``no_grads`` and
+        ``tensor_no_grad`` cannot be recomputed here: they must be snapshotted
+        before the op runs, since autograd may flip ``requires_grad`` on an
+        in-place result.
         """
+        info = _classify_args(args, kwargs)
+
         # Local op (regular op or registered local autograd Function):
         # infer output type from tensor types + scalars.
         spec = _OP_REGISTRY.get(func)
@@ -3110,7 +3129,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         # pad partition_specs with None (and no_grad with True, since
         # scalars never receive gradients) to keep the lists aligned.
         partition_specs = list(info.partition_specs)
-        no_grad = list(info.tensor_no_grad)
+        no_grad = list(tensor_no_grad)
         while len(partition_specs) < len(input_types_list):
             partition_specs.append(None)
             no_grad.append(True)
@@ -3152,7 +3171,7 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         # Validate mutation safety for in-place/out operations.
         mutated = _get_mutated_tensors(func, args, kwargs, result)
         if mutated:
-            _validate_mutation_types(func, mutated, output_type, info.no_grads)
+            _validate_mutation_types(func, mutated, output_type, no_grads)
 
         _set_result_type(result, output_type)
         out = original_kwargs.get("out")
