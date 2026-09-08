@@ -91,6 +91,10 @@ Never manually call `__enter__` / `__exit__` on context managers in tests. If a 
 Check if you are using system Python.  If so, you need to enter an environment; if there is guidance in your context about how to activate it follow that guidance.
 
 ```bash
+# Preferred: the internal uv test environment in fb/ci (torch 2.15 wheel set,
+# what Buildkite CI runs), from this directory
+uv sync --project fb/ci && uv run --project fb/ci pytest -q tests
+
 # Run all spmd_types tests
 pytest -x -s spmd_types/tests/*_test.py
 
