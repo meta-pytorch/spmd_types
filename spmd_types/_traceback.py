@@ -35,6 +35,7 @@ import types
 from contextlib import contextmanager
 from typing import Optional
 
+import torch
 from spmd_types._frame import _is_internal_frame
 from spmd_types.types import SpmdTypeError
 
@@ -119,7 +120,8 @@ def _filter_and_reraise(e: SpmdTypeError) -> None:  # noqa: C901
     """
     mode = _resolve_mode(_FILTERING)
 
-    if mode == "off":
+    # Traceback objects cannot be inspected while Dynamo is tracing.
+    if mode == "off" or torch.compiler.is_compiling():
         return
 
     tb = e.__traceback__
