@@ -56,6 +56,9 @@ dist.destroy_process_group()
 
 ## Documentation
 
+See the [SPMD Types documentation](https://meta-pytorch.org/spmd_types/) for
+the complete user and API documentation.
+
 See [Local SPMD types](docs/local_spmd_types.md) for a hands-on guide on
 porting Megatron-derived training frameworks, including the Megatron-to-spmd_types
 function mapping table and advice on Invariant vs Replicate.

@@ -26,8 +26,16 @@ classifiers = [
 dependencies = [
 ]
 
+[project.optional-dependencies]
+docs = [
+    "myst-parser==2.0.0",
+    "pytorch-sphinx-theme2==0.4.13",
+    "sphinx==7.2.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/meta-pytorch/spmd_types"
+Documentation = "https://meta-pytorch.org/spmd_types/"
 Repository = "https://github.com/meta-pytorch/spmd_types"
 Issues = "https://github.com/meta-pytorch/spmd_types/issues"
 
@@ -46,6 +54,7 @@ target-version = "py310"
 select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.format]
+exclude = ["*.md"]
 quote-style = "double"
 
 [tool.pytest.ini_options]

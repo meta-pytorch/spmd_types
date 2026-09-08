@@ -37,12 +37,14 @@ def set_current_mesh(
 
     Args:
         axes: The mesh to set. Accepts:
+
             - A ``dict[str, MeshAxis]`` mapping names to axes (preferred).
             - A ``DeviceMesh`` whose named dimensions are converted to MeshAxis
               (names are taken from ``mesh_dim_names``).
             - A frozenset of orthogonal MeshAxis objects (no string lookup).
             - A sequence of ProcessGroup objects, each converted via
               ``MeshAxis.of()`` (no string lookup).
+
             When omitted, reuses the current mesh.
         local_axes: An outer prefix of mesh axes that retains local SPMD
             semantics during global type checking. Each coordinate on these
