@@ -12,6 +12,14 @@ clear and has sufficient instructions to be able to reproduce the issue.
 We are not currently accepting pull requests at this time, but we plan to enable them
 soon. In the meantime, please file an issue and we'll work with you from there.
 
+## Building the documentation
+
+```bash
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html -d docs/_build/doctrees docs docs/_build/html
+```
+
 Meta has a [bounty program](https://www.facebook.com/whitehat/) for the safe
 disclosure of security bugs. In those cases, please go through the process
 outlined on that page and do not file a public issue.
