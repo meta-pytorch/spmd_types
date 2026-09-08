@@ -189,8 +189,8 @@ def _not_yet_implemented(func, args, kwargs):
 
 # Functions that have __torch_function__ support in PyTorch and will be
 # intercepted by SpmdTypeMode:
-#   all_gather, all_gather_into_tensor, all_reduce,
-#   all_to_all_single, reduce_scatter_tensor
+#   all_gather, all_gather_into_tensor (all_gather_single), all_reduce,
+#   all_to_all_single, reduce_scatter_tensor (reduce_scatter_single)
 #
 # Functions that do NOT have __torch_function__ support yet (entries here
 # are dormant until PyTorch adds support or we add manual patching):
@@ -225,3 +225,15 @@ RAW_DIST_RULES: dict[Callable, Callable] = {
     _torch_dist.isend: _not_yet_implemented,
     _torch_dist.irecv: _not_yet_implemented,
 }
+
+# PyTorch 2.15 renamed all_gather_into_tensor -> all_gather_single and
+# reduce_scatter_tensor -> reduce_scatter_single, keeping the old names as
+# deprecated wrappers that call the new functions.  __torch_function__ then sees
+# the new function object, so register it under the same rule.
+for _old, _new in (
+    ("all_gather_into_tensor", "all_gather_single"),
+    ("reduce_scatter_tensor", "reduce_scatter_single"),
+):
+    _fn = getattr(_torch_dist, _new, None)
+    if _fn is not None:
+        RAW_DIST_RULES[_fn] = RAW_DIST_RULES[getattr(_torch_dist, _old)]

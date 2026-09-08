@@ -3158,14 +3158,17 @@ class TestErrorContextRawDist(LocalTensorTestCase, expecttest.TestCase):
         with typecheck("strict"):
             with self.assertRaises(SpmdTypeError) as ctx:
                 dist.all_gather_into_tensor(out, x, group=self.pg)
-        self.assertExpectedInline(
+        # PyTorch >= 2.15 routes the deprecated name through all_gather_single,
+        # which is the name the error then reports.
+        name = getattr(dist, "all_gather_single", dist.all_gather_into_tensor).__name__
+        self.assertEqual(
             str(ctx.exception),
-            """\
-all_gather_into_tensor: expected input type PerMeshAxisLocalSpmdType.V on axis default_pg, got PerMeshAxisLocalSpmdType.R
+            f"""\
+{name}: expected input type PerMeshAxisLocalSpmdType.V on axis default_pg, got PerMeshAxisLocalSpmdType.R
 
-  In all_gather_into_tensor(
-    output_tensor: f32[6] {default_pg: R},
-    input_tensor: f32[2] {default_pg: R},
+  In {name}(
+    output_tensor: f32[6] {{default_pg: R}},
+    input_tensor: f32[2] {{default_pg: R}},
     group: default_pg,
     async_op: False,
   )""",
