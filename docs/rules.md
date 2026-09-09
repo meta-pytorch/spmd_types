@@ -295,7 +295,7 @@ explicit `placements=` only for a configuration enumeration cannot construct.
 For rulecheck to work, the autograd function in question must be "mesh
 invariant" (that is, it can work with an arbitrarily sized device mesh--in
 particular, it must be possible to run it on a mesh of size one, which is how
-the reference value is computed unless you pass your own `reference=`.)
+the reference value is computed.)
 
 It is easiest to use `rulecheck` for local operations, which run on plain
 per-rank tensors with no distributed setup.  A kernel that calls collectives

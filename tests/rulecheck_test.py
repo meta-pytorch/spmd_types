@@ -162,7 +162,6 @@ class TestRuleCheck(unittest.TestCase):
                 "bias": {"dp": R, "tp": S(0)},
             },
             mesh=MESH,
-            reference=lambda x, w, b, g: x @ w.T + b,
             local_tensor_mode=True,
         )
 
@@ -173,7 +172,6 @@ class TestRuleCheck(unittest.TestCase):
             (x, w, "tp"),
             {"x": {"dp": S(0), "tp": S(1)}, "w": {"dp": R, "tp": S(1)}},
             mesh=MESH,
-            reference=lambda x, w, g: x @ w.T,
             local_tensor_mode=True,
         )
 
@@ -184,7 +182,6 @@ class TestRuleCheck(unittest.TestCase):
             (x, w, "tp"),
             {"x": {"dp": S(0), "tp": S(1)}, "w": {"dp": R, "tp": S(1)}},
             mesh=MESH,
-            reference=lambda x, w, g: x @ w.T,
             local_tensor_mode=True,
         )
 
@@ -195,7 +192,6 @@ class TestRuleCheck(unittest.TestCase):
             (logits, "tp"),
             {"logits": {"dp": S(0), "tp": S(1)}},
             mesh=MESH,
-            reference=lambda logits, g: torch.logsumexp(logits, dim=-1),
             local_tensor_mode=True,
         )
 
@@ -221,7 +217,6 @@ class TestRuleCheck(unittest.TestCase):
             (x, "tp"),
             {"x": {"dp": S(0), "tp": P}},
             mesh=MESH,
-            reference=lambda x, g: x,
             local_tensor_mode=True,
         )
 
@@ -239,7 +234,6 @@ class TestRuleCheck(unittest.TestCase):
                 (torch.randn(4, 8),),
                 {"x": {"dp": S(0), "tp": S(1)}},
                 mesh=MESH,
-                reference=lambda x: torch.softmax(x, dim=-1),
             )
         self.assertIn("differs from the reference", str(cm.exception))
 
@@ -255,14 +249,12 @@ class TestRuleCheck(unittest.TestCase):
                 (torch.randn(4, 8),),
                 {"x": {"dp": S(0), "tp": S(1)}},
                 mesh=MESH,
-                reference=lambda x: torch.softmax(x, dim=-1),
             )
         rulecheck(
             GoodSoftmax,
             (torch.randn(4, 8),),
             {"x": {"dp": S(0), "tp": R}},
             mesh=MESH,
-            reference=lambda x: torch.softmax(x, dim=-1),
         )
 
     def test_forgotten_reduce_is_caught(self):
@@ -293,7 +285,6 @@ class TestRuleCheck(unittest.TestCase):
                 (torch.randn(8, 6), torch.randn(4, 6), "tp"),
                 {"x": {"dp": S(0), "tp": S(1)}, "w": {"dp": R, "tp": S(1)}},
                 mesh=MESH,
-                reference=lambda x, w, g: x @ w.T,
                 local_tensor_mode=True,
             )
         self.assertIn("typed I on 'tp'", str(cm.exception))
@@ -325,7 +316,6 @@ class TestRuleCheck(unittest.TestCase):
                 (torch.randn(4, 6),),
                 {"x": {"dp": S(0), "tp": S(1)}},
                 mesh=MESH,
-                reference=lambda x: x.T,
             )
             with self.assertRaises(RuleCheckError) as cm:
                 rulecheck(
@@ -333,7 +323,6 @@ class TestRuleCheck(unittest.TestCase):
                     (torch.randn(4, 6),),
                     {"x": {"dp": S(0), "tp": S(1)}},
                     mesh=MESH,
-                    reference=lambda x: x.T,
                     local_tensor_mode=True,
                 )
             self.assertIn("call it with none initialized", str(cm.exception))
@@ -359,7 +348,6 @@ class TestRuleCheck(unittest.TestCase):
             (torch.randn(4, 6),),
             {"x": {"dp": S(0), "tp": R}},
             mesh=MESH,
-            reference=lambda x: x * 2,
             local_tensor_mode=True,
         )
 
@@ -383,12 +371,12 @@ class TestRuleCheck(unittest.TestCase):
         report = rulecheck(
             RMSNorm,
             (torch.randn(4, 6), torch.randn(6), 1e-5),
-            reference=lambda x, w, eps: torch.nn.functional.rms_norm(x, (6,), w, eps),
         )
         checked = report.checked
         self.assertIn({"x": {"shard": S(0)}, "weight": {"shard": R}}, checked)
         self.assertIn({"x": {"shard": R}, "weight": {"shard": R}}, checked)
-        rejected = [p for p, _ in report.rejected]
+        self.assertTrue(all(rejection.reason for rejection in report.rejected))
+        rejected = [rejection.placement for rejection in report.rejected]
         self.assertIn({"x": {"shard": S(1)}, "weight": {"shard": R}}, rejected)
         self.assertIn({"x": {"shard": R}, "weight": {"shard": S(0)}}, rejected)
 
@@ -401,7 +389,6 @@ class TestRuleCheck(unittest.TestCase):
             rulecheck(
                 BadSoftmax,
                 (torch.randn(4, 8),),
-                reference=lambda x: torch.softmax(x, -1),
             )
         self.assertIn("under placements {x: {shard: S(1)}}", str(cm.exception))
 
@@ -409,7 +396,6 @@ class TestRuleCheck(unittest.TestCase):
         report = rulecheck(
             LinearAllReduce,
             (torch.randn(8, 6), torch.randn(4, 6), "tp"),
-            reference=lambda x, w, g: x @ w.T,
             local_tensor_mode=True,
         )
         # The only placement this kernel is correct for shards k on both
@@ -441,7 +427,6 @@ class TestRuleCheck(unittest.TestCase):
             rulecheck(
                 Permissive,
                 (torch.randn(8, 6), torch.randn(4, 6), "tp"),
-                reference=lambda x, w, g: x @ w.T,
                 local_tensor_mode=True,
             )
         self.assertIn("under placements {x: {tp: S(0)}, w: {tp: R}}", str(cm.exception))
@@ -461,7 +446,7 @@ class TestRuleCheck(unittest.TestCase):
                 return g
 
         with self.assertRaises(RuleCheckError) as cm:
-            rulecheck(Refuses, (torch.randn(4),), reference=lambda x: x)
+            rulecheck(Refuses, (torch.randn(4),))
         self.assertIn("rejected every enumerated placement", str(cm.exception))
 
     def test_placements_must_cover_every_axis(self):
@@ -471,7 +456,6 @@ class TestRuleCheck(unittest.TestCase):
                 (torch.randn(4, 8),),
                 {"x": {"dp": S(0)}},
                 mesh=MESH,
-                reference=lambda x: torch.softmax(x, dim=-1),
             )
         self.assertIn("missing 'tp'", str(cm.exception))
 
@@ -577,9 +561,6 @@ class TestCaseStudy(unittest.TestCase):
         report = rulecheck(
             VocabParallelCrossEntropy,
             (logits, target, "tp"),
-            reference=lambda l, t, g: torch.nn.functional.cross_entropy(
-                l, t, reduction="none"
-            ),
             local_tensor_mode=True,
         )
         # The kernel all-reduces over the group, so it is only correct when the

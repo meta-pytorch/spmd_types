@@ -5,5 +5,5 @@ Numerically check an `spmd_typecheck` hook against its kernel.  See
 
 ```{eval-rst}
 .. automodule:: spmd_types.rulecheck
-   :members: rulecheck, RuleCheckReport, RuleCheckError
+   :members: rulecheck, RuleCheckPlacement, RuleCheckRejection, RuleCheckReport, RuleCheckError
 ```

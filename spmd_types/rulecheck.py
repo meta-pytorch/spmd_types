@@ -26,8 +26,7 @@ types promise:
    concatenated along ``S(i)`` dims in mesh order, summed over ``P`` axes,
    checked equal across ``R``/``I`` ranks;
 4. the result is compared with the kernel itself evaluated on the global
-   inputs (any group standing for a world of size one), or with ``reference``
-   if given.
+   inputs, with every group standing for a world of size one.
 
 The recommended call passes no placements and lets ``rulecheck`` enumerate::
 
@@ -57,7 +56,7 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations, product
-from typing import Any
+from typing import Any, NamedTuple
 from unittest import mock
 
 import torch
@@ -91,14 +90,35 @@ class RuleCheckError(AssertionError):
     """The hook's derived types do not describe what the kernel computed."""
 
 
+type RuleCheckPlacement = dict[str, dict[str, PerMeshAxisSpmdType]]
+
+
+class RuleCheckRejection(NamedTuple):
+    """An enumerated placement refused by the hook, and its reason."""
+
+    placement: RuleCheckPlacement
+    reason: str
+
+
 # =============================================================================
 # Mesh layout shared by both backends
 # =============================================================================
 
 
 class _Mesh:
-    """Names, sizes and the row-major rank layout (``init_device_mesh`` lays
-    ranks out row-major too, so both backends agree on coordinates)."""
+    """Backend-independent description of the mesh simulated by rulecheck.
+
+    The insertion order of the supplied axis names defines a row-major rank
+    layout, matching ``init_device_mesh``.  The description is available
+    before any process group exists and supports coordinates for every
+    simulated rank, which the plain-tensor backend and placement construction
+    both need.
+
+    ``axes()`` realizes the same topology as process-group-free ``MeshAxis``
+    objects for the plain backend.  The LocalTensor backend instead uses the
+    stored names and sizes to construct a real ``DeviceMesh`` after setting up
+    its fake process group.
+    """
 
     def __init__(self, mesh: Mapping[str, int]) -> None:
         self.names = list(mesh)
@@ -135,7 +155,22 @@ class _Mesh:
 def _to_spmd_type(
     placement: SpmdType | Mapping[str, PerMeshAxisSpmdType], ndim: int
 ) -> tuple[dict[str, PerMeshAxisSpmdType], list[tuple[str, ...]]]:
-    """Return (per-axis local types by name, per-dim sharding axes by name)."""
+    """Normalize the two public placement forms used by rulecheck.
+
+    A mapping can encode sharding directly with ``S(i)`` values, whereas an
+    ``SpmdType`` stores local ``V`` types separately from a ``PartitionSpec``.
+    Convert either form into the representation needed to construct rank-local
+    inputs:
+
+    * a local type for each named mesh axis, with every ``S(i)`` lowered to
+      ``V``; and
+    * for each of the tensor's ``ndim`` dimensions, the ordered mesh-axis names
+      that shard it.
+
+    Negative shard dimensions are resolved against ``ndim``.  Mesh membership,
+    complete axis coverage, and shape divisibility are validated later by
+    ``_Distributor``, which has the mesh and concrete tensor shape.
+    """
     if isinstance(placement, SpmdType):
         local = dict(placement.local_type)
         spec = placement.partition_spec
@@ -185,7 +220,24 @@ def _spec_from_dims(dims: list[tuple[str, ...]]) -> PartitionSpec | None:
 
 
 class _Distributor:
-    """Per-rank pieces of one global tensor under a placement."""
+    """Materialize one global input tensor under a proposed placement.
+
+    Construction normalizes the placement into local per-axis types and
+    ordered sharding axes per tensor dimension.  It then validates that the
+    placement covers exactly the mesh under test and that every sharded tensor
+    dimension is divisible by the product of the axes sharding it.  The
+    corresponding PartitionSpec is retained for annotating local values.
+
+    ``piece(rank)`` produces that rank's physical input.  It repeatedly chunks
+    sharded dimensions in outer-to-inner mesh-axis order.  On Partial axes it
+    instead constructs deterministic, nondegenerate rank-local contributions
+    whose sum is the sliced global value; the tensor name and other mesh
+    coordinates keep independent partial groups distinct.  The returned value
+    is cloned so separate simulated ranks never alias storage.
+
+    ``annotate`` attaches the normalized local types and PartitionSpec to a
+    piece before the typechecked kernel runs.
+    """
 
     def __init__(
         self,
@@ -271,13 +323,14 @@ def _reassemble(  # noqa: C901
     typed: Any,
     by_rank: dict[int, torch.Tensor],
     mesh: _Mesh,
-    rtol: float,
-    atol: float,
 ) -> torch.Tensor:
     """Combine per-rank outputs into the global value the derived type implies.
 
     ``typed`` carries the derived annotations (the LocalTensor output, or any
     rank's output in the plain backend); ``by_rank`` holds the per-rank values.
+    Partial axes are summed and sharded axes concatenated.  Replicate and
+    Invariant axes must agree exactly across ranks; numerical tolerances apply
+    only later, when the reassembled value is compared with the reference.
     """
     by_name = _axis_names()
     local_type = {
@@ -333,7 +386,15 @@ def _reassemble(  # noqa: C901
                 folded[rest] = torch.cat(pieces, dim=shard_dim[axis])
             else:  # R / I: all ranks along the axis must agree
                 for j, piece in enumerate(pieces[1:], 1):
-                    if not torch.allclose(piece, pieces[0], rtol=rtol, atol=atol):
+                    if piece.shape != pieces[0].shape:
+                        raise RuleCheckError(
+                            f"rulecheck: {label} is typed {typ!r} on {axis!r}, but "
+                            f"ranks at coordinate 0 and {j} along {axis!r} hold "
+                            f"values of different shapes {tuple(pieces[0].shape)} "
+                            f"and {tuple(piece.shape)}. The kernel left this axis "
+                            f"varying or partial."
+                        )
+                    if not torch.equal(piece, pieces[0]):
                         raise RuleCheckError(
                             f"rulecheck: {label} is typed {typ!r} on {axis!r}, but "
                             f"ranks at coordinate 0 and {j} along {axis!r} hold "
@@ -363,8 +424,8 @@ class RuleCheckReport:
     with another operand.
     """
 
-    checked: list[dict[str, dict[str, Any]]] = field(default_factory=list)
-    rejected: list[tuple[dict[str, dict[str, Any]], str]] = field(default_factory=list)
+    checked: list[RuleCheckPlacement] = field(default_factory=list)
+    rejected: list[RuleCheckRejection] = field(default_factory=list)
 
 
 def rulecheck(  # noqa: C901
@@ -374,7 +435,6 @@ def rulecheck(  # noqa: C901
     | None = None,
     *,
     mesh: Mapping[str, int] | None = None,
-    reference: Callable[..., Any] | None = None,
     rtol: float = 1e-4,
     atol: float = 1e-5,
     local_tensor_mode: bool = False,
@@ -385,10 +445,9 @@ def rulecheck(  # noqa: C901
         cls: an autograd Function with an ``spmd_typecheck`` hook.
         args: positional arguments for ``cls.apply`` with *global* tensors.
             A string equal to a mesh axis name stands for that axis's process
-            group; the kernel receives the fake group and ``reference``
-            receives ``None`` in its place.  Without ``mesh=`` the single
-            string argument, if any, names the axis; with several string
-            arguments ``mesh=`` is required.
+            group.  Without ``mesh=`` the single string argument, if any,
+            names the axis; with several string arguments ``mesh=`` is
+            required.
         placements: per tensor argument (by ``forward`` parameter name), the
             placement to test: a dict of mesh axis name to ``R``/``I``/``V``/
             ``P``/``S(i)``, or an ``SpmdType``.  Every mesh axis must be
@@ -406,12 +465,9 @@ def rulecheck(  # noqa: C901
             ``{"shard": 2}`` if there is none; with several axes the product
             of the per-axis enumerations is tried (the hook pre-checks every
             combination; the kernel runs only for the accepted ones).
-        reference: the kernel's meaning on global tensors, called with
-            ``args`` (groups replaced by ``None``).  By default the kernel
-            itself is run on the global tensors, with any group argument
-            standing for a world of size one, which is the single-device
-            program the sharded run must be equivalent to.
-        rtol, atol: tolerances for the comparison.
+        rtol, atol: tolerances for comparing the reassembled output with the
+            reference. Replicate and Invariant ranks must instead agree
+            exactly; these tolerances do not relax that check.
         local_tensor_mode: simulate the ranks in-process under
             ``LocalTensorMode`` with a fake process group, so that
             ``torch.distributed`` calls inside the kernel execute and
@@ -435,7 +491,7 @@ def rulecheck(  # noqa: C901
         if mesh is None:
             raise TypeError("rulecheck: mesh= is required with explicit placements")
         _check_one(
-            cls, args, placements, _Mesh(mesh), reference, rtol, atol, local_tensor_mode
+            cls, args, placements, _Mesh(mesh), None, rtol, atol, local_tensor_mode
         )
         return None
 
@@ -459,9 +515,9 @@ def rulecheck(  # noqa: C901
     # pre-check, no kernel run) sees every combination; the kernel runs for the
     # ones it accepts.
     per_axis = [_enumerate_placements(tensors, axis, m.size(axis)) for axis in m.names]
-    candidates: list[dict[str, dict[str, Any]]] = []
+    candidates: list[RuleCheckPlacement] = []
     for combo in product(*per_axis):
-        merged: dict[str, dict[str, Any]] = {n: {} for n in tensors}
+        merged: RuleCheckPlacement = {n: {} for n in tensors}
         for part in combo:
             for n, v in part.items():
                 merged[n].update(v)
@@ -475,22 +531,25 @@ def rulecheck(  # noqa: C901
             "rulecheck: local_tensor_mode sets up its own fake process group; "
             "call it with none initialized"
         )
-    if reference is None and local_tensor_mode:
+    expected = None
+    if local_tensor_mode:
         # The reference does not depend on the placement; compute it once
         # rather than once per accepted placement (each is a fake-pg setup).
-        expected_single = _single_device(cls, args, m)
-        reference = lambda *_: expected_single  # noqa: E731
+        expected = _single_device(cls, args, m)
+    elif not any(isinstance(a, str) and a in m.names for a in args):
+        # Same for the plain backend: hoist the placement-independent reference
+        # so it is not recomputed for every candidate. (A group argument would
+        # make _check_one raise before the kernel runs, so skip it here.)
+        expected = _plain_reference(cls, args, m)
     returns_types, _ = hook_shape(cls)
     report = RuleCheckReport()
     for placement in candidates:
         rejection = _hook_rejects(cls, args, placement, m)
         if rejection is not None:
-            report.rejected.append((placement, rejection))
+            report.rejected.append(RuleCheckRejection(placement, rejection))
             continue
         try:
-            _check_one(
-                cls, args, placement, m, reference, rtol, atol, local_tensor_mode
-            )
+            _check_one(cls, args, placement, m, expected, rtol, atol, local_tensor_mode)
         except SpmdTypeError as e:
             if returns_types:
                 # The hook already accepted this placement in the pre-check, so a
@@ -505,7 +564,9 @@ def rulecheck(  # noqa: C901
             # An imperative hook (out first) cannot be pre-checked by
             # _hook_rejects, so it refuses a placement by raising here; that is a
             # rejection, not a failure of the whole enumeration.
-            report.rejected.append((placement, str(e).splitlines()[0]))
+            report.rejected.append(
+                RuleCheckRejection(placement, str(e).splitlines()[0])
+            )
         except RuleCheckError as e:
             raise RuleCheckError(
                 f"{e}\n  under placements {_fmt_placement(placement)}"
@@ -523,17 +584,34 @@ def rulecheck(  # noqa: C901
 
 def _enumerate_placements(
     tensors: Mapping[str, torch.Tensor], axis: str, n: int
-) -> list[dict[str, dict[str, Any]]]:
-    """All-replicated; per dim size, one dim of that size sharded on every
-    subset of tensors together (reaches labels shared by any number of
-    operands); each floating tensor Partial alone and all together; all
-    Invariant."""
+) -> list[RuleCheckPlacement]:
+    """Generate the candidate placements for one mesh axis of size ``n``.
+
+    The result starts with every tensor Replicated.  For each tensor-dimension
+    size divisible by ``n``, it then generates every nonempty subset of tensors
+    having a dimension of that size.  Each selected tensor is sharded on one
+    such dimension (including every choice when it has several matching
+    dimensions), while every unselected tensor remains Replicated.  This
+    reaches both independently sharded operands and any number of operands
+    sharded together as a potential shared einsum label.
+
+    It additionally generates one placement with each floating-point tensor
+    Partial by itself, one with all floating-point tensors Partial together,
+    and one with every tensor Invariant.  Non-floating tensors remain
+    Replicated in Partial candidates because rulecheck cannot construct
+    numeric Partial contributions for them.  Duplicate candidates are removed
+    while preserving their first occurrence.
+
+    These are placements for only ``axis``.  ``rulecheck`` takes the Cartesian
+    product of the lists for all mesh axes and merges their per-tensor maps to
+    obtain multi-axis placements.
+    """
     names = list(tensors)
-    base = {name: {axis: R} for name in names}
-    candidates: list[dict[str, dict[str, Any]]] = []
+    base: RuleCheckPlacement = {name: {axis: R} for name in names}
+    candidates: list[RuleCheckPlacement] = []
     seen: set[tuple] = set()
 
-    def add(p: dict[str, dict[str, Any]]) -> None:
+    def add(p: RuleCheckPlacement) -> None:
         key = tuple((k, repr(v[axis])) for k, v in sorted(p.items()))
         if key not in seen:
             seen.add(key)
@@ -578,7 +656,7 @@ def _hook_rejects(
     # naming a parameter that ``forward`` lacks raises TypeError from
     # hook_kwargs, as run_typecheck does.
     try:
-        forward_args, dists, _ = _bind(cls, args, placement, m)
+        forward_args, dists = _bind(cls, args, placement, m)
         if not returns_types:
             return None
         with set_current_mesh(m.axes()):
@@ -611,14 +689,14 @@ def _check_one(
     args: tuple[Any, ...],
     placements: Mapping[str, Any],
     m: _Mesh,
-    reference: Callable[..., Any] | None,
+    expected: Any | None,
     rtol: float,
     atol: float,
     local_tensor_mode: bool,
 ) -> None:
     uses_groups = any(isinstance(a, str) and a in m.names for a in args)
     if local_tensor_mode:
-        _run_local_tensor_mode(cls, args, placements, m, reference, rtol, atol)
+        _run_local_tensor_mode(cls, args, placements, m, expected, rtol, atol)
     elif uses_groups:
         raise RuleCheckError(
             "rulecheck: an argument names a mesh axis as a process group; pass "
@@ -626,24 +704,20 @@ def _check_one(
             "LocalTensorMode with a fake process group"
         )
     else:
-        _run_plain(cls, args, placements, m, reference, rtol, atol)
+        _run_plain(cls, args, placements, m, expected, rtol, atol)
 
 
 def _bind(
     cls: type, args: tuple[Any, ...], placements: Mapping[str, Any], m: _Mesh
-) -> tuple[dict[str, object], dict[str, _Distributor], list[Any]]:
-    """Bind args; return (forward_args, distributors by name, reference args)."""
+) -> tuple[dict[str, object], dict[str, _Distributor]]:
+    """Bind args and construct distributors for the tensor arguments."""
     forward_args = bind_forward_args(cls, args)
     dists: dict[str, _Distributor] = {}
-    ref_args: list[Any] = []
     for name, value in forward_args.items():
         if isinstance(value, torch.Tensor):
             if name not in placements:
                 raise RuleCheckError(f"rulecheck: no placement given for {name!r}")
             dists[name] = _Distributor(name, value, placements[name], m)
-            ref_args.append(value)
-        elif isinstance(value, str) and value in m.names:
-            ref_args.append(None)
         else:
             # A tensor nested inside a container (e.g. a ``*args`` parameter,
             # which binds to a tuple) gets no _Distributor, so it would be fed
@@ -657,8 +731,7 @@ def _bind(
                     f"tuple/list forward parameter); rulecheck can only place a "
                     f"tensor passed as its own positional forward argument"
                 )
-            ref_args.append(value)
-    return forward_args, dists, ref_args
+    return forward_args, dists
 
 
 def _leaves(value: Any) -> list[Any]:
@@ -685,7 +758,7 @@ def _compare(
         if not isinstance(typed, torch.Tensor):
             continue
         label = f"output {i}" if len(out_leaves) > 1 else "the output"
-        got = _reassemble(label, typed, by_rank_of(i), m, rtol, atol)
+        got = _reassemble(label, typed, by_rank_of(i), m)
         if got.shape != exp.shape:
             raise RuleCheckError(
                 f"rulecheck: {label} reassembles to shape {tuple(got.shape)} but the "
@@ -707,19 +780,24 @@ def _compare(
             )
 
 
+def _plain_reference(cls: type, args: tuple[Any, ...], m: _Mesh) -> Any:
+    """The kernel on the global tensors: the reference the plain backend checks
+    each placement's reassembly against."""
+    with set_current_mesh(m.axes()), torch.no_grad():
+        return cls.apply(*args)
+
+
 def _run_plain(
     cls: type,
     args: tuple[Any, ...],
     placements: Mapping[str, Any],
     m: _Mesh,
-    reference: Callable[..., Any] | None,
+    expected: Any | None,
     rtol: float,
     atol: float,
 ) -> None:
     """No collectives: run the kernel on ordinary tensors, once per rank."""
-    forward_args, dists, ref_args = _bind(cls, args, placements, m)
-    if reference is None:
-        reference = cls.apply
+    forward_args, dists = _bind(cls, args, placements, m)
     per_rank: list[Any] = []
     with set_current_mesh(m.axes()):
         for rank in range(m.world):
@@ -731,8 +809,9 @@ def _run_plain(
             ]
             with typecheck(local=False):
                 per_rank.append(cls.apply(*local_args))
-        with torch.no_grad():
-            expected = reference(*ref_args)
+        if expected is None:
+            with torch.no_grad():
+                expected = cls.apply(*args)
         _compare(
             per_rank[0],
             expected,
@@ -805,7 +884,7 @@ def _run_local_tensor_mode(
     args: tuple[Any, ...],
     placements: Mapping[str, Any],
     m: _Mesh,
-    reference: Callable[..., Any] | None,
+    expected: Any | None,
     rtol: float,
     atol: float,
 ) -> None:
@@ -815,9 +894,8 @@ def _run_local_tensor_mode(
             "rulecheck: local_tensor_mode sets up its own fake process group; "
             "call it with none initialized"
         )
-    if reference is None:
-        expected_single = _single_device(cls, args, m)
-        reference = lambda *_: expected_single  # noqa: E731
+    if expected is None:
+        expected = _single_device(cls, args, m)
     _reset()
     dist.init_process_group(
         backend="fake", rank=0, world_size=m.world, store=FakeStore()
@@ -831,7 +909,7 @@ def _run_local_tensor_mode(
             set_current_mesh(device_mesh),
             _per_rank_get_rank(device_mesh, m),
         ):
-            forward_args, dists, ref_args = _bind(cls, args, placements, m)
+            forward_args, dists = _bind(cls, args, placements, m)
             local_args = []
             for name, value in forward_args.items():
                 if name in dists:
@@ -844,8 +922,6 @@ def _run_local_tensor_mode(
                     local_args.append(value)
             with typecheck(local=False):
                 outputs = cls.apply(*local_args)
-            with torch.no_grad():
-                expected = reference(*ref_args)
 
             def by_rank(i: int) -> dict[int, torch.Tensor]:
                 out = _leaves(outputs)[i]
@@ -861,4 +937,10 @@ def _run_local_tensor_mode(
         _reset()
 
 
-__all__ = ["RuleCheckError", "RuleCheckReport", "rulecheck"]
+__all__ = [
+    "RuleCheckError",
+    "RuleCheckPlacement",
+    "RuleCheckRejection",
+    "RuleCheckReport",
+    "rulecheck",
+]
