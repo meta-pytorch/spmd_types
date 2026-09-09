@@ -26,6 +26,7 @@ from spmd_types import (
     local_map,
     P,
     R,
+    rules,
     S,
     Scalar,
     set_current_mesh,
@@ -2322,6 +2323,7 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
 
             @staticmethod
             def spmd_typecheck(output, *, x, y):
+                rules.ignore(x, y)
                 assert_type(output, {self.pg: R})
 
             @staticmethod
@@ -2348,6 +2350,7 @@ class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
             def spmd_typecheck(output, *, x, scale):
                 received["x"] = x
                 received["scale"] = scale
+                rules.ignore(x)
                 assert_type(output, {self.pg: R})
 
             @staticmethod
@@ -2482,6 +2485,7 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
 
             @staticmethod
             def spmd_typecheck(outputs, *, inputs):
+                rules.ignore(*inputs)
                 received["inputs"] = inputs
                 for output in outputs:
                     assert_type(output, {self.pg: V})
@@ -2519,6 +2523,8 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
             @staticmethod
             def spmd_typecheck(outputs, *, x):
                 received["x"] = x
+                assert_type(x, {self.pg: R})
+                assert_type(outputs, {self.pg: R})
 
             @staticmethod
             def backward(ctx, grad):
@@ -2534,9 +2540,10 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
 
         class WideOp(self.WideOp):
             @staticmethod
-            def spmd_typecheck(_outputs, *, x, sequence_parallel):
+            def spmd_typecheck(outputs, *, x, sequence_parallel):
                 self.assertTrue(sequence_parallel)
                 assert_type(x, {self.pg: R})
+                assert_type(outputs, {self.pg: R})
 
         self._apply(WideOp, self._generate_inputs((4,), self.pg, R))
 
@@ -2566,8 +2573,9 @@ class TestSpmdTypecheckHook(SpmdTypeCheckedTestCase):
 
         class WideOp(self.WideOp):
             @staticmethod
-            def spmd_typecheck(outputs, *, gather_output):
+            def spmd_typecheck(outputs, *, x, gather_output):
                 self.assertFalse(gather_output)
+                rules.ignore(x)
                 assert_type(outputs, {self.pg: V})
 
         result = self._apply(WideOp, self._generate_inputs((4,), self.pg, R))

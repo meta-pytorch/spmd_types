@@ -38,6 +38,7 @@ pip install spmd_types
 key_concepts
 local_spmd_types
 global_spmd_types
+rules
 api/index
 ```
 

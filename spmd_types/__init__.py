@@ -7,6 +7,7 @@
 # spmd_types package
 from __future__ import annotations
 
+from spmd_types import rules  # noqa: F401
 from spmd_types._collectives import (  # noqa: F401
     all_gather,
     all_reduce,

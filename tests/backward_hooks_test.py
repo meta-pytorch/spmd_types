@@ -12,7 +12,7 @@ Covers: _backward_hooks.py
 
 import torch
 import torch.nn as nn
-from spmd_types import R, register_local_backward_hook, S, SpmdTypeError, V
+from spmd_types import P, R, register_local_backward_hook, S, SpmdTypeError, V
 from spmd_types._checker import assert_type, get_partition_spec, typecheck
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type
@@ -74,6 +74,15 @@ class TestBackwardHookRegistry(SpmdTypeCheckedTestCase):
         y = module(x)
 
         self.assertIs(get_axis_local_type(y, self.pg), V)
+
+    def test_local_hook_preserves_partial_type(self):
+        module = _Identity()
+        module.register_full_backward_hook(_test_hook_local)
+        x = self._generate_inputs((4,), self.pg, P)
+
+        y = module(x)
+
+        self.assertIs(get_axis_local_type(y, self.pg), P)
 
     def test_local_pre_hook_preserves_spmd_type(self):
         module = _Identity()

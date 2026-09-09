@@ -360,6 +360,14 @@ P -> I      all_reduce(I)           I -> R      convert(I,R)
 P -> V      reduce_scatter()        V -> R      all_gather(R)
 ```
 
+### Opaque autograd functions
+
+We've gone through a few iterations of how to let users write custom autograd
+functions, but right now the convention is to write a `spmd_typecheck`
+static method on your custom autograd function that implements the typing
+rule.  There is a new `spmd_types.rules` module for writing global SPMD
+sharding rules in a concise way; check the [rules docs](rules.md) for more details.
+
 ### Loss gradient types
 
 The loss's type on each mesh axis depends on whether the axis partitions

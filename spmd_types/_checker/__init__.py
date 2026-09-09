@@ -3066,8 +3066,8 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
                         f"{register_local_autograd_function.__name__}("
                         f"{autograd_cls.__name__}) to mark it as safe "
                         f"for type propagation, or define "
-                        f"{autograd_cls.__name__}.spmd_typecheck for a custom "
-                        f"typecheck rule."
+                        f"{autograd_cls.__name__}.spmd_typecheck composed from "
+                        f"spmd_types.rules operations to declare its comms."
                     )
                 return result
 

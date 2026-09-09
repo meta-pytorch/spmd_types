@@ -98,7 +98,19 @@ def install() -> None:
         return
 
     def _spmd_typecheck(outputs, *, args):
-        pass
+        # BackwardHookFunction is the identity on its tensor arguments: each
+        # output carries its input's type and sharding (rules imports runtime,
+        # so import lazily here).
+        from spmd_types import rules
+
+        if len(outputs) != len(args):
+            raise SpmdTypeError(
+                "BackwardHookFunction returned a different number of values than "
+                f"it received ({len(outputs)} vs. {len(args)})"
+            )
+        for out, arg in zip(outputs, args):
+            if isinstance(out, torch.Tensor) and isinstance(arg, torch.Tensor):
+                rules.einsum("...->...", arg, linear_in=(0,), out=out)
 
     BackwardHookFunction.spmd_typecheck = staticmethod(_spmd_typecheck)
 

@@ -21,11 +21,14 @@ DO NOT USE THESE AGENTS FOR THIS PROJECT, IT IS ACTIVELY COUNTERPRODUCTIVE.
 |------|---------|
 | `types.py` | Type hierarchy (`R`, `I`, `V`, `P`, `S`), `PartitionSpec` |
 | `docs/design.md` | Design specification for the type system |
-| `_checker.py` | Type tracking on tensors, type inference rules, trace logging |
+| `_checker/__init__.py` | Type tracking on tensors, type inference rules, trace logging (the `_checker` package) |
+| `runtime.py` | Annotation API (`assert_type`, `mutate_type`), autograd Function hook detection |
 | `_frame.py` | User-frame resolution for trace callsite reporting |
 | `_dist.py` | Patchable `torch.distributed` reference (use `_dist.dist` instead of importing `torch.distributed` directly) |
 | `_collectives.py` | Collective operations |
 | `_local.py` | Local (no-comms) operations: `reinterpret`, `convert` |
+| `rules.py` | Composable type-only ops for writing `spmd_typecheck` hooks; reference in `docs/rules.md` |
+| `rulecheck.py` | Test-only (not imported by the package): numeric check of an `spmd_typecheck` hook against its kernel; see `docs/rules.md` |
 | `_raw_dist.py` | Type rules for raw `torch.distributed` collectives |
 | `_type_attr.py` | Low-level tensor type attribute helpers (`get_local_type`, `set_local_type`, etc.) |
 | `_testing.py` | Test utilities (`fake_pg`, etc.) |
@@ -64,8 +67,8 @@ All fenced code blocks in markdown files must have a language tag. Use `python` 
 ## Registering PyTorch-internal autograd functions
 
 When a PyTorch-internal `torch.autograd.Function` subclass needs SPMD type
-annotations, register it at module level in `_checker.py` (at the bottom of
-the file, alongside `_ToTorchTensor`, `_FromTorchTensor`, and
+annotations, register it at module level in `_checker/__init__.py` (at the
+bottom of the file, alongside `_ToTorchTensor`, `_FromTorchTensor`, and
 `_NoopSaveInputs`).  Do NOT register them inside test functions or user code
 -- they are PyTorch internals and belong with the other PyTorch native
 registrations.
@@ -73,14 +76,14 @@ registrations.
 - Use `register_local_autograd_function(cls)` for ops that do NOT communicate
   (no collectives). The type checker infers output types from input types using
   the standard non-comms typing rules.
-- Define an `spmd_typecheck` staticmethod for ops that DO communicate (internal
-  collectives like all-gather, all-reduce). The hook is detected automatically,
-  runs after the real op, receives its exact return value as the first argument,
-  and names only the forward arguments it needs. `register_autograd_function`
-  remains supported for legacy `typecheck_forward` wrappers.
-- The legacy `typecheck_forward` wrapper remains supported for existing code.
-  It must validate input types, run the op under `no_typecheck()`, stamp the
-  correct output type, and return the output.
+- Define an `spmd_typecheck` staticmethod for ops that DO communicate or that
+  are opaque local kernels, composed from `spmd_types.rules` and returning the
+  output type(s). `docs/rules.md` is the reference; read it first. Gotchas:
+  every Tensor argument of `forward` must be consumed by a `rules` op or
+  `rules.ignore(x)`; add a `rulecheck(...)` test for any hook with a
+  global-SPMD story; do not write new hooks in the imperative
+  `spmd_typecheck(out, *, ...)` style or as `typecheck_forward` wrappers
+  (legacy only; one hook per class).
 - Guard with `getattr(..., None)` if the class may not exist in all PyTorch
   versions.
 
@@ -104,6 +107,8 @@ pytest -x -s spmd_types/tests/checker_test.py       # Type inference, strict mod
 pytest -x -s spmd_types/tests/local_test.py         # Local (no-comms) operations: reinterpret, convert
 pytest -x -s spmd_types/tests/collectives_test.py   # Collective ops: all_reduce, all_gather, reduce_scatter, all_to_all
 pytest -x -s spmd_types/tests/api_test.py           # Cross-module integration: redistribute, negative dim sharding
+pytest -x -s spmd_types/tests/rules_test.py           # Composable spmd_typecheck rules (rules.einsum, type-only collectives)
+pytest -x -s spmd_types/tests/rulecheck_test.py       # rulecheck: numeric check of a hook against its kernel
 ```
 
 Tests use `LocalTensorMode` with a `FakeStore` to simulate multiple ranks in a single process -- no GPU or distributed backend needed.

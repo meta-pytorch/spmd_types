@@ -181,7 +181,27 @@ invariant (not partial!)
 
 ### Custom autograd functions
 
-TODO: write
+You do not have to use `spmd_types` built-in collectives.  If you'd prefer
+to keep your existing custom autograd functions around collectives, you can
+instead teach `spmd_types` how to typecheck them by implementing `spmd_typecheck`
+on them.
+
+Most collectives will map to a pre-existing `spmd_types` collective rule.
+For convenience, you can use the typing rules in `spmd_types.rules` to specify
+your function has the same typing rules as an `spmd_types` collective:
+
+```python
+from spmd_types import rules, R, S
+
+
+class GatherSP(torch.autograd.Function):
+    @staticmethod
+    def spmd_typecheck(*, x, tp_group):
+        return rules.all_gather(x, tp_group, src=S(0), dst=R)
+```
+
+See [rules](rules.md) for more details on this, including `rules.einsum` that
+can be used to express local operations that may be fused to a collective.
 
 ### Propagation rules
 

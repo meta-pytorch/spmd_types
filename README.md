@@ -63,6 +63,10 @@ See [Local SPMD types](docs/local_spmd_types.md) for a hands-on guide on
 porting Megatron-derived training frameworks, including the Megatron-to-spmd_types
 function mapping table and advice on Invariant vs Replicate.
 
+See [Rules](docs/rules.md) for how to write an `spmd_typecheck` typing rule
+for your own custom autograd functions by composing `spmd_types.rules`, and
+how to test it numerically with `rulecheck`.
+
 See [Design](docs/design.md) for the full type system specification, including
 local vs global SPMD modes, collective signatures with diagrams, forward-backward
 pairs, expert mode, cross-mesh compatibility, and partition spec redistribute.
