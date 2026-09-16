@@ -237,6 +237,12 @@ rules.reinterpret(y, axis, src=V, dst=P)
 rules.convert(x, axis, src=R, dst=S(0))
 ```
 
+These rules accept `out=` to annotate and return an output tensor. If `out`
+is the input tensor itself, the rule checks `src` and updates its annotation
+in place, including its shard dimension. The output rank must still match:
+`rules.all_reduce(x, group, src=V, dst=I, out=x)` supports an in-place reduction.
+A separate output tensor's existing annotations must agree with the derived type.
+
 For example, Megatron defines `_CopyToModelParallelRegion`, which is a no-op
 in forwards but an all-reduce in backward.  This corresponds directly to
 `convert(I, R)`.  So we can type it as follows:

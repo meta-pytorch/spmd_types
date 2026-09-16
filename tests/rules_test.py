@@ -473,9 +473,10 @@ class TestTransitions(GlobalSigTestCase):
             str(cm.exception),
             """rules.all_gather('tp', src=S(0), dst=R) expects its input sharded on dim 0 along mesh_tp, but it is sharded on dim 1""",
         )
-        with self.assertRaises(SpmdTypeError) as cm:
-            rules.all_gather(self.dims(2, dp=R, tp=V), "tp", src=S(0), dst=R)
-        self.assertIn("not sharded", str(cm.exception))
+        x = self.dims(2, dp=R, tp=V)
+        y = rules.all_gather(x, "tp", src=S(0), dst=R)
+        self.assertTyped(x, {"dp": R, "tp": V}, PartitionSpec("tp", None))
+        self.assertTyped(y, {"dp": R, "tp": R}, None)
 
     def test_src_is_set_when_untyped(self):
         x = self.typed((4,), dp=R)
@@ -782,6 +783,32 @@ Nothing.spmd_typecheck: returned None; a keyword-only spmd_typecheck must return
         self.assertTyped(target, {"dp": V, "tp": V}, PartitionSpec("tp", "dp"))
         with self.assertRaises(SpmdTypeError):
             rules.all_gather(x, "tp", src=V, dst=R, out=target)  # stack form has rank 3
+
+    def test_transition_out_can_be_the_input(self):
+        x = self.sharded((4, 6), PartitionSpec("dp", "tp"))
+        self.assertIs(rules.all_reduce(x, "tp", src=V, dst=I, out=x), x)
+        self.assertTyped(x, {"dp": V, "tp": I}, PartitionSpec("dp", None))
+
+        self.assertIs(rules.convert(x, "tp", src=I, dst=S(1), out=x), x)
+        self.assertTyped(x, {"dp": V, "tp": V}, PartitionSpec("dp", "tp"))
+        self.assertIs(rules.all_gather(x, "tp", src=S(1), dst=R, out=x), x)
+        self.assertTyped(x, {"dp": V, "tp": R}, PartitionSpec("dp", None))
+
+    def test_transition_out_rejects_invalid_input_and_rank_before_mutating(self):
+        x = self.sharded((4, 6), PartitionSpec("dp", "tp"))
+        with self.assertRaisesRegex(SpmdTypeError, "expects its input"):
+            rules.all_reduce(x, "tp", src=P, dst=I, out=x)
+        with self.assertRaisesRegex(SpmdTypeError, "output has 2 dim"):
+            rules.all_gather(x, "tp", src=V, dst=I, out=x)
+        self.assertTyped(x, {"dp": V, "tp": V}, PartitionSpec("dp", "tp"))
+
+    def test_transition_out_rejects_conflicting_separate_output(self):
+        x = self.typed((4, 6), dp=R, tp=V)
+        target = self.typed((4, 6), dp=R, tp=V)
+        with self.assertRaisesRegex(SpmdTypeError, "output already has type"):
+            rules.all_reduce(x, "tp", src=V, dst=I, out=target)
+        self.assertTyped(x, {"dp": R, "tp": V}, None)
+        self.assertTyped(target, {"dp": R, "tp": V}, None)
 
     def test_assert_type_on_an_input_counts_as_coverage(self):
         """A hook may still assert_type an input it does not feed to a rules

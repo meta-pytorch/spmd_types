@@ -50,6 +50,7 @@ from spmd_types.runtime import (
     assert_type,
     get_partition_spec,
     has_local_type,
+    mutate_type,
 )
 from spmd_types.types import (
     _canonicalize_shard,
@@ -647,8 +648,9 @@ def _transition(  # noqa: C901
     ``allowed`` describes the operation-specific ``src``/``dst`` pairs.  Once
     that declaration and ``x`` are validated, the transition checks that
     ``x`` actually has ``src`` on ``axis``.  An axis not yet present on ``x``
-    is established as ``src``; a singleton axis needs no stored annotation and
-    skips this check.
+    is established as ``src``.  A sharded source also refines an existing
+    unqualified ``V`` to ``S(i)``; a singleton axis needs no stored annotation
+    and skips this check.
 
     ``S(i)`` is checked in two parts: its local type must be ``V`` and its
     PartitionSpec must shard dimension ``i`` on this axis.  Negative shard
@@ -670,6 +672,8 @@ def _transition(  # noqa: C901
     tr = _Transition(kind, axis, src, dst)
     mesh_axis = normalize_axis(axis)
     ndim = x.ndim
+    src_c = _canonicalize_shard(src, ndim)
+    dst_c = _canonicalize_shard(dst, ndim)
     if mesh_axis.size() == 1:
         # Nothing to check on a singleton axis, but the stack/unbind forms
         # still change the kernel's output rank.
@@ -679,6 +683,13 @@ def _transition(  # noqa: C901
         # Untyped on this axis: the operation's src establishes it, the way
         # the real collective would.
         assert_type(x, {axis: src})
+    elif (
+        isinstance(src_c, Shard)
+        and partition_spec_get_shard(get_partition_spec(x), mesh_axis) is None
+    ):
+        # V carries no shard dimension by itself. The explicit S(i) source
+        # supplies that missing refinement.
+        assert_type(x, {axis: src})
     local_type = dict(get_local_type(x))
     spec = get_partition_spec(x)
     actual = local_type[mesh_axis]
@@ -687,8 +698,6 @@ def _transition(  # noqa: C901
             f"{tr!r} expects its input to be {src!r} on axis "
             f"{format_axis(mesh_axis)}, but it is {actual!r}"
         )
-    src_c = _canonicalize_shard(src, ndim)
-    dst_c = _canonicalize_shard(dst, ndim)
     if (
         kind == "convert"
         and isinstance(src_c, Shard)
@@ -719,6 +728,9 @@ def _transition(  # noqa: C901
         )
     )
     ndim, new_spec = _rank_change(tr, ndim, new_spec)
+    if out is x and out.ndim == ndim:
+        mutate_type(out, axis, src=src, dst=dst)
+        _set_partition_spec(out, new_spec)
     return _finish(_make(ndim, local_type, new_spec), out)
 
 
