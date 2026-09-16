@@ -62,6 +62,8 @@ be imported in model code without pulling in the heavy checker logic.
 
 .. autofunction:: spmd_types.runtime.mutate_type
 
+.. autofunction:: spmd_types.runtime.reinterpret_no_grad
+
 .. autofunction:: spmd_types.runtime.has_local_type
 
 .. autofunction:: spmd_types.runtime.get_partition_spec

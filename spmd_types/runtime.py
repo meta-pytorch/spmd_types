@@ -50,6 +50,7 @@ from spmd_types.types import (
     _check_orthogonality,
     DeviceMeshAxis,
     format_axis,
+    I,
     LocalSpmdType,
     normalize_axis,
     normalize_local_type,
@@ -59,6 +60,7 @@ from spmd_types.types import (
     PerMeshAxisLocalSpmdType,
     PerMeshAxisSpmdType,
     PerMeshAxisSpmdTypes,
+    R,
     Shard,
     shard_types_to_partition_spec,
     SpmdType,
@@ -730,6 +732,42 @@ def mutate_type(
             dst=dst_type,
         )
     return _set_local_type(tensor, new_type)
+
+
+@api_boundary
+def reinterpret_no_grad(
+    tensor: torch.Tensor,
+    axis: DeviceMeshAxis,
+    *,
+    dst: PerMeshAxisSpmdType,
+) -> torch.Tensor:
+    """Reinterpret ``R`` as ``I``, or vice versa, when no gradient can flow.
+
+    ``R`` and ``I`` have identical forward values and differ only in their
+    backward behavior, so changing between them is safe for a tensor with
+    ``requires_grad=False``. The tensor data is not modified.
+    """
+    if tensor.requires_grad:
+        raise ValueError("reinterpret_no_grad requires tensor.requires_grad=False")
+    dst_local = to_local_type(dst)
+    if dst_local not in (R, I):
+        raise ValueError(f"reinterpret_no_grad requires dst=R or dst=I; got dst={dst}")
+    mesh_axis = normalize_axis(axis)
+    if mesh_axis.size() == 1:
+        return tensor
+    local_type = get_local_type(tensor)
+    if mesh_axis not in local_type:
+        raise SpmdTypeError(
+            f"reinterpret_no_grad: axis {format_axis(mesh_axis)} not found in "
+            "tensor's SPMD type"
+        )
+    src_local = local_type[mesh_axis]
+    if src_local not in (R, I):
+        raise SpmdTypeError(
+            "reinterpret_no_grad requires the current type to be R or I; "
+            f"got {src_local} on axis {format_axis(mesh_axis)}"
+        )
+    return mutate_type(tensor, mesh_axis, src=src_local, dst=dst_local)
 
 
 # =============================================================================

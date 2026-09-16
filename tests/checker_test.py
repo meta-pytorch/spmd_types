@@ -26,6 +26,7 @@ from spmd_types import (
     local_map,
     P,
     R,
+    reinterpret_no_grad,
     rules,
     S,
     Scalar,
@@ -2176,6 +2177,40 @@ class TestMutateType(LocalTensorTestCase):
         assert_type(x, {self.dp: V})
         result = mutate_type(x, self.dp, src=V, dst=R)
         self.assertIs(result, x)
+
+
+class TestReinterpretNoGrad(LocalTensorTestCase):
+    WORLD_SIZE = 2
+
+    def test_reinterprets_between_replicated_types(self):
+        for src, dst in ((R, I), (I, R)):
+            with self.subTest(src=src, dst=dst):
+                x = torch.tensor([True, False])
+                assert_type(x, {self.pg: src})
+
+                result = reinterpret_no_grad(x, self.pg, dst=dst)
+
+                self.assertIs(result, x)
+                self.assertIs(get_axis_local_type(x, self.pg), dst)
+
+    def test_rejects_tensor_requiring_grad(self):
+        x = torch.randn(4, requires_grad=True)
+        assert_type(x, {self.pg: R})
+
+        with self.assertRaisesRegex(ValueError, "requires_grad=False"):
+            reinterpret_no_grad(x, self.pg, dst=I)
+
+    def test_rejects_other_transitions(self):
+        x = torch.randn(4)
+        assert_type(x, {self.pg: V})
+
+        with self.assertRaisesRegex(SpmdTypeError, "current type to be R or I"):
+            reinterpret_no_grad(x, self.pg, dst=I)
+
+        x = torch.randn(4)
+        assert_type(x, {self.pg: R})
+        with self.assertRaisesRegex(ValueError, "requires dst=R or dst=I"):
+            reinterpret_no_grad(x, self.pg, dst=V)
 
 
 class TestAutogradFunctionApply(SpmdTypeCheckedTestCase):
