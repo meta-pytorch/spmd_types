@@ -27,8 +27,8 @@ from __future__ import annotations
 import builtins
 import logging
 import os
-from contextlib import AbstractContextManager, contextmanager
-from typing import Any, Callable, overload, TypeAlias
+from contextlib import _GeneratorContextManager, contextmanager
+from typing import Any, Callable, overload, TypeAlias, TypeVar
 
 import torch
 from spmd_types._coverage import _mark_asserted
@@ -1034,8 +1034,15 @@ def local():
         yield
 
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
 @overload
-def no_typecheck() -> AbstractContextManager[None]: ...
+def no_typecheck() -> _GeneratorContextManager[None]: ...
+
+
+@overload
+def no_typecheck(fn: _F, /) -> _F: ...
 
 
 @overload
@@ -1044,8 +1051,16 @@ def no_typecheck(
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
 
-def no_typecheck(**kwargs: Any):
-    """Disable checking in a context or across an explicitly typed function."""
+def no_typecheck(fn: Callable[..., Any] | None = None, /, **kwargs: Any):
+    """Disable checking with ``with no_typecheck()``, ``no_typecheck(fn)``,
+    or ``@no_typecheck()``. Supply ``out_types`` for an explicitly typed boundary.
+    """
+    if fn is not None:
+        if not callable(fn) or kwargs:
+            raise TypeError(
+                "no_typecheck(fn) requires a callable and no type specifications"
+            )
+        return _no_typecheck_context()(fn)
     if not kwargs:
         return _no_typecheck_context()
     if "out_types" not in kwargs or kwargs.keys() - {"in_types", "out_types"}:

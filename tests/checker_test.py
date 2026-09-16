@@ -1779,6 +1779,36 @@ class TestScalarWrapper(SpmdTypeCheckedTestCase):
         self.assertIs(local_type[normalize_axis(self.pg)], V)
 
 
+class TestNoTypecheckCallable(unittest.TestCase):
+    def test_callable_and_decorator(self):
+        def fn(x: int, *, fail: bool = False) -> int:
+            self.assertFalse(is_type_checking())
+            with no_typecheck():
+                self.assertFalse(is_type_checking())
+            if fail:
+                raise ValueError("test failure")
+            return x
+
+        for wrap in (no_typecheck, no_typecheck()):
+            wrapped = wrap(fn)
+            self.assertEqual(wrapped.__name__, fn.__name__)
+            self.assertEqual(wrapped(1), 1)
+            with typecheck():
+                for x in (2, 3):
+                    self.assertEqual(wrapped(x, fail=False), x)
+                    self.assertTrue(is_type_checking())
+                with self.assertRaisesRegex(ValueError, "test failure"):
+                    wrapped(4, fail=True)
+                self.assertTrue(is_type_checking())
+            self.assertFalse(is_type_checking())
+
+    def test_rejects_invalid_callable_form(self):
+        with self.assertRaisesRegex(TypeError, "requires a callable"):
+            no_typecheck(42)
+        with self.assertRaisesRegex(TypeError, "no type specifications"):
+            no_typecheck(lambda x: x, out_types={})
+
+
 class TestThreadLocalState(SpmdTypeCheckedTestCase):
     """Test thread-local state helpers: is_type_checking, no_typecheck."""
 
