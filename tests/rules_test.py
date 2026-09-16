@@ -860,6 +860,30 @@ Nothing.spmd_typecheck: returned None; a keyword-only spmd_typecheck must return
         assert_type(d, {"dp": R, "tp": S(0)})
         self.assertTyped(d, {"dp": R, "tp": V}, PartitionSpec("tp"))
 
+    def test_shared_hook_defaults_for_absent_forward_parameters(self):
+        def shared_rule(*, x, y=None):
+            if y is None:
+                return rules.einsum("ab->ab", x)
+            return rules.einsum("ab,ab->ab", x, y, linear_in=((0, 1),))
+
+        class Unary(torch.autograd.Function):
+            spmd_typecheck = staticmethod(shared_rule)
+
+            @staticmethod
+            def forward(ctx, x):
+                return x.clone()
+
+        class Binary(torch.autograd.Function):
+            spmd_typecheck = staticmethod(shared_rule)
+
+            @staticmethod
+            def forward(ctx, x, y=None):
+                return x.clone() if y is None else x + y
+
+        x = self.sharded((4, 6), PartitionSpec("dp", "tp"))
+        for out in (Unary.apply(x), Binary.apply(x), Binary.apply(x, x)):
+            self.assertTyped(out, {"dp": V, "tp": V}, PartitionSpec("dp", "tp"))
+
     def test_hook_names_must_be_forward_parameters(self):
         class Op(torch.autograd.Function):
             @staticmethod

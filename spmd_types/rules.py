@@ -949,18 +949,22 @@ def hook_kwargs(
     forward_args: dict[str, object],
     names: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
-    """The keyword arguments for ``cls.spmd_typecheck``; a name that is not a
-    ``forward`` parameter is a ``TypeError`` naming it.  ``names`` may be passed
-    when ``hook_shape(cls)`` was already computed by the caller."""
+    """The keyword arguments for ``cls.spmd_typecheck``. Hook defaults apply
+    to names absent from ``forward``; missing required names raise ``TypeError``.
+    ``names`` may be passed when ``hook_shape(cls)`` was already computed."""
     if names is None:
         _, names = hook_shape(cls)
     for name in names:
-        if name not in forward_args:
+        if (
+            name not in forward_args
+            and _signature(cls.spmd_typecheck).parameters[name].default
+            is inspect.Parameter.empty
+        ):
             raise TypeError(
                 f"{cls.__name__}.spmd_typecheck: {name!r} is not a parameter of "
                 f"{cls.__name__}.forward (has {sorted(forward_args)})"
             )
-    return {name: forward_args[name] for name in names}
+    return {name: forward_args[name] for name in names if name in forward_args}
 
 
 def bind_forward_args(cls: type, args: tuple[object, ...]) -> dict[str, object]:
