@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from spmd_types import _state
 from spmd_types._mesh_axis import flatten_axes, MeshAxis
 from spmd_types.types import (
     format_axis,
@@ -239,7 +240,7 @@ def _walk_groups(  # noqa: C901
     return result
 
 
-def _remap_partition_spec(
+def _remap_partition_spec(  # noqa: C901
     spec: PartitionSpec,
     group_pairs: list[tuple[list[MeshAxis], list[MeshAxis]]],
 ) -> PartitionSpec:
@@ -258,12 +259,14 @@ def _remap_partition_spec(
 
     Returns:
         The remapped PartitionSpec (preserving rank).  Raises
-        ``SpmdTypeError`` if a spec entry cannot be fully segmented into
-        group pairs.
+        ``SpmdTypeError`` if an unrepresentable suffix contains unmapped axes
+        or global axes. The active checker's axis policy is queried only when
+        decay is needed; policy errors propagate unchanged. Without a checker,
+        shard detail may decay.
 
     Examples::
 
-        # group_pairs = [([K], [K]), ([A, B], [C])]
+        # In global mode, with group_pairs = [([K], [K]), ([A, B], [C])]:
 
         # Multi-axis entry segments into ([A, B],) -> replaced by C:
         _remap_partition_spec(PartitionSpec((A, B)), group_pairs)      # -> PartitionSpec(C)
@@ -279,11 +282,18 @@ def _remap_partition_spec(
 
         # Shared axis passes through:
         _remap_partition_spec(PartitionSpec(K, None), group_pairs)     # -> PartitionSpec(K, None)
+
+        # Partial match may decay in local mode:
+        with typecheck(local=True):
+            _remap_partition_spec(PartitionSpec(A), group_pairs)      # -> PartitionSpec(None)
     """
     # Build a map from tuple(src_group) -> dst_group for segment matching.
     src_to_dst: dict[tuple[MeshAxis, ...], list[MeshAxis]] = {}
     for src_group, dest_group in group_pairs:
         src_to_dst[tuple(src_group)] = dest_group
+    axis_to_dst = {
+        axis: dest_group for src_group, dest_group in group_pairs for axis in src_group
+    }
 
     entries: list[PartitionSpecEntry] = []
     for dim, entry in enumerate(spec):
@@ -301,12 +311,28 @@ def _remap_partition_spec(
                     i = end
                     break
             else:
+                # Pausing automatic checking does not change the policy of
+                # explicit annotation APIs such as reinterpret_mesh.
+                mode = _state._current_mode()
+                if all(
+                    axis in axis_to_dst
+                    and all(
+                        mode is None or not mode._is_global_axis(dst_axis)
+                        for dst_axis in axis_to_dst[axis]
+                    )
+                    for axis in src_axes[i:]
+                ):
+                    # Preserve the mapped outer prefix; dropping an outer shard
+                    # also loses the ordering needed to retain its inner shards.
+                    break
                 raise SpmdTypeError(
                     f"Cannot remap PartitionSpec: dim {dim} is sharded on "
                     f"{format_axis(src_axes[0]) if len(src_axes) == 1 else src_axes} "
                     f"which does not exactly match any remapped group."
                 )
-        if len(sub_entries) == 1:
+        if not sub_entries:
+            entries.append(None)
+        elif len(sub_entries) == 1:
             entries.append(sub_entries[0])
         else:
             entries.append(tuple(sub_entries))
