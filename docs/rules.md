@@ -153,9 +153,10 @@ which help handle some common situations:
    on this dimension (i.e., the operator accesses "all elements" along that
    dimension.)  In outputs, this placeholder says the
    output dim is unsharded (no mesh axis shards it); it is also how you write
-   an output dim that no input index feeds.  Note that in local SPMD, a `V`
-   with no shard dim is accepted at a `_` slot (a `V` carrying `S(i)` on that
-   dim is rejected even under local checking); if you must not accept `V`, it
+   an output dim that no input index feeds. These partition constraints apply
+   only to global mesh axes. On local axes, shard dimensions are ignored and
+   the result carries only the local R/I/V/P type, so `V` is accepted at a `_`
+   slot even when the input carries `S(i)`. If you must not accept `V`, it
    is likely there is a collective involved, and you should be using one of
    the collective rules (below).
 

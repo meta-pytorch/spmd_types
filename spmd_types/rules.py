@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from spmd_types import _state
 from spmd_types._coverage import _cov, _coverage, _mark_asserted, _touch  # noqa: F401
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._type_attr import _LOCAL_TYPE_ATTR, get_local_type
@@ -138,6 +139,7 @@ def ignore(*tensors: torch.Tensor) -> None:
 # =============================================================================
 # einsum
 # =============================================================================
+
 
 _ELLIPSIS = "..."
 _OPAQUE = "_"
@@ -360,8 +362,11 @@ def _einsum_label_axes(  # noqa: C901
     """
     label_axes: dict[str, tuple[MeshAxis, ...]] = {}
     axis_label: dict[MeshAxis, str] = {}
+    mode = _state._current_mode()
     for i, (value, lbls) in enumerate(zip(operands, labels)):
         for dim, (lbl, axes) in enumerate(zip(lbls, _actual_axes(value))):
+            if mode is not None:
+                axes = tuple(axis for axis in axes if mode._is_global_axis(axis))
             if lbl == _OPAQUE:
                 if axes:
                     raise SpmdTypeError(
@@ -490,7 +495,7 @@ def einsum(
     scalar output is an empty right-hand side (``"tv,t->"``).  One output per
     call: a kernel with several outputs composes several ``rules.einsum`` calls.
 
-    Per mesh axis, from the operands' actual placements:
+    Per global mesh axis, from the operands' actual placements:
 
     - a sharded label that reaches the output keeps its sharding there;
     - a sharded label that reaches no output (a contraction) makes the
@@ -505,7 +510,8 @@ def einsum(
     not additive (``max``, ``logsumexp``, ``mean``, a norm) must use ``_``
     for that dim, which requires it to be complete on every rank.
 
-    Axes that shard nothing are combined with the ordinary typing rule (``R``
+    Local mesh axes ignore shard dimensions and produce no output partition
+    metadata. They and axes that shard nothing use the ordinary typing rule (``R``
     with ``V`` is ``V``, ``I`` does not mix).  A Partial *operand* is a
     different claim, about linearity in the operand's value rather than
     additivity along an index, and must be declared with ``linear_in``: the

@@ -104,6 +104,71 @@ class LocalSigTestCase(_MeshTestCase):
 # =============================================================================
 
 
+class TestLocalEinsum(LocalSigTestCase):
+    def test_combines_local_types(self):
+        for left, right, expected in ((R, R, R), (R, V, V), (V, V, V), (I, I, I)):
+            with self.subTest(left=left, right=right):
+                x = self.dims(2, dp=R, tp=left)
+                y = self.dims(1, dp=R, tp=right)
+                result = rules.einsum("__ , _ -> __", x, y)
+                self.assertTyped(result, {"dp": R, "tp": expected}, None)
+                self.assertEqual(result.ndim, 2)
+
+    def test_rejects_invariant_mixing_and_partial(self):
+        for left, right in ((I, R), (I, V), (P, R), (P, P)):
+            with self.subTest(left=left, right=right):
+                x = self.dims(2, dp=R, tp=left)
+                y = self.dims(2, dp=R, tp=right)
+                with self.assertRaises(SpmdTypeError):
+                    rules.einsum("ij,ij->ij", x, y)
+
+    def test_does_not_invent_partition_alignment(self):
+        x = self.dims(2, PartitionSpec("tp", None), dp=R)
+        y = self.dims(2, dp=R, tp=V)
+        result = rules.einsum("ij,ij->ij", x, y)
+        self.assertTyped(result, {"dp": R, "tp": V}, None)
+
+    def test_local_shards_do_not_propagate_or_contract(self):
+        x = self.dims(2, PartitionSpec("tp", None), dp=R)
+        for equation in ("ij->ij", "ij->j", "__->__", "ij->ji"):
+            with self.subTest(equation=equation):
+                result = rules.einsum(equation, x)
+                self.assertTyped(result, {"dp": R, "tp": V}, None)
+
+    def test_hook_coverage_and_output(self):
+        class Add(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, y):
+                return x + y
+
+            @staticmethod
+            def spmd_typecheck(outputs, *, x, y):
+                rules.einsum("...,...->...", x, y, out=outputs)
+
+        x = self.typed((4, 6), dp=R, tp=V)
+        y = self.typed((4, 6), dp=R, tp=R)
+        self.assertTyped(Add.apply(x, y), {"dp": R, "tp": V}, None)
+
+
+class TestMixedEinsum(GlobalSigTestCase):
+    def test_only_global_axes_propagate_or_contract(self):
+        with set_current_mesh(self.mesh, local_axes=("dp",)):
+            x = self.dims(2, PartitionSpec("dp", "tp"))
+            self.assertTyped(
+                rules.einsum("ij->ij", x),
+                {"dp": V, "tp": V},
+                PartitionSpec(None, "tp"),
+            )
+            self.assertTyped(rules.einsum("ij->", x), {"dp": V, "tp": P}, None)
+            self.assertTyped(
+                rules.einsum("_j->_j", x),
+                {"dp": V, "tp": V},
+                PartitionSpec(None, "tp"),
+            )
+            with self.assertRaises(SpmdTypeError):
+                rules.einsum("i_->i_", x)
+
+
 class TestEinsum(GlobalSigTestCase):
     def test_batch_and_free_dims_keep_sharding(self):
         x = self.sharded((4, 6), PartitionSpec("dp", None), tp=R)
