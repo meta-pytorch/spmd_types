@@ -56,7 +56,7 @@ import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations, product
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeAlias
 from unittest import mock
 
 import torch
@@ -90,7 +90,7 @@ class RuleCheckError(AssertionError):
     """The hook's derived types do not describe what the kernel computed."""
 
 
-type RuleCheckPlacement = dict[str, dict[str, PerMeshAxisSpmdType]]
+RuleCheckPlacement: TypeAlias = dict[str, dict[str, PerMeshAxisSpmdType]]
 
 
 class RuleCheckRejection(NamedTuple):
