@@ -2698,8 +2698,9 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
     def __torch_function__(self, func, types, args=(), kwargs=None):  # noqa: C901
         kwargs = kwargs or {}
-        # Paused via no_typecheck(): run without type checking.
-        if self._disabled:
+        # Paused via no_typecheck() or register_no_typecheck(): run without
+        # type checking.
+        if self._disabled or _state._in_no_typecheck_frame():
             return func(*args, **kwargs)
 
         # Property access (e.g. .grad, .data, .shape): pass through unless registered

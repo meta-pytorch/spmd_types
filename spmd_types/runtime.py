@@ -25,6 +25,7 @@ need the annotation APIs.
 from __future__ import annotations
 
 import builtins
+import inspect
 import logging
 import os
 from contextlib import _GeneratorContextManager, contextmanager
@@ -38,7 +39,12 @@ from spmd_types._local_registration import (  # noqa: F401
 )
 from spmd_types._mesh_axis import MeshAxis
 from spmd_types._scalar_sentinel import _Scalar
-from spmd_types._state import _no_typecheck_context, current_mesh, is_type_checking
+from spmd_types._state import (
+    _NO_TYPECHECK_CODES,
+    _no_typecheck_context,
+    current_mesh,
+    is_type_checking,
+)
 from spmd_types._traceback import api_boundary
 from spmd_types._type_attr import (
     _LOCAL_TYPE_ATTR,
@@ -1072,6 +1078,26 @@ def no_typecheck(fn: Callable[..., Any] | None = None, /, **kwargs: Any):
         in_types=kwargs.get("in_types", Infer),
         out_types=kwargs["out_types"],
     )
+
+
+def register_no_typecheck(fn: _F) -> _F:
+    """Disable checking whenever ``fn`` is running, without wrapping it.
+
+    ``@no_typecheck`` replaces ``fn`` with a wrapper, so it only works when
+    applied at the definition site, and it misses references bound before
+    it is applied.  This instead registers ``fn``'s code object: every op run
+    while that code is on the current thread's stack is unchecked, however
+    ``fn`` was reached (an import alias, a bound method, a stored callback).
+    Use it to exempt code you would rather not edit.  Wrappers are followed
+    through ``__wrapped__`` (as ``functools.wraps`` sets it) to the innermost
+    function, whose frame is on the stack whenever any wrapper runs it.  A
+    ``typecheck()`` entered inside ``fn`` does not re-enable checking.
+    """
+    code = getattr(inspect.unwrap(fn), "__code__", None)
+    if code is None:
+        raise TypeError(f"register_no_typecheck: {fn!r} is not a Python function")
+    _NO_TYPECHECK_CODES.add(code)
+    return fn
 
 
 def local_map(

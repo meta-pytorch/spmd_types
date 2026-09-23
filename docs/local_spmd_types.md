@@ -440,7 +440,10 @@ your SPMD type checking is operating on the compute mesh -- TODO link.)
 What you should do is:
 
 - Liberally apply `spmd.no_typecheck` onto everything that can get called into
-  during forwards.
+  during forwards.  If you would rather not edit the FSDP code, call
+  `spmd.register_no_typecheck(fn)` from your own setup code instead: it
+  disables checking whenever `fn`'s code is on the call stack, no matter how
+  `fn` was reached.
 
 - Ensure that the all-gathered parameter that is put on the module and to be
   used during compute has a correct local SPMD type.

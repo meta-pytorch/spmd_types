@@ -16,12 +16,14 @@ C++ thread-local storage (PythonTorchFunctionTLS), so modes are per-thread.
 
 from __future__ import annotations
 
+import sys
 import threading
 from contextlib import contextmanager
 from typing import NamedTuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from types import CodeType
 
     from spmd_types._mesh_axis import MeshAxis
     from torch.distributed import ProcessGroup
@@ -38,11 +40,26 @@ class MeshEntry(NamedTuple):
 
 _tls = threading.local()
 
+# Code objects of functions registered with ``register_no_typecheck``.
+_NO_TYPECHECK_CODES: set[CodeType] = set()
+
+
+def _in_no_typecheck_frame() -> bool:
+    """Return True if a ``register_no_typecheck`` function is on this thread's stack."""
+    if not _NO_TYPECHECK_CODES:
+        return False
+    frame = sys._getframe(1)
+    while frame is not None:
+        if frame.f_code in _NO_TYPECHECK_CODES:
+            return True
+        frame = frame.f_back
+    return False
+
 
 def is_type_checking() -> bool:
     """Return True if type checking is active and not paused on this thread."""
     mode = _current_mode()
-    return mode is not None and not mode._disabled
+    return mode is not None and not mode._disabled and not _in_no_typecheck_frame()
 
 
 @contextmanager

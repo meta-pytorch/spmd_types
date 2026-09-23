@@ -66,6 +66,7 @@ from spmd_types.runtime import (  # noqa: F401
     no_typecheck,
     register_autograd_function,
     register_decomposition,
+    register_no_typecheck,
     reinterpret_no_grad,
     trace,
 )

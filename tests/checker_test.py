@@ -18,6 +18,7 @@ import expecttest
 import torch
 import torch.distributed as dist
 from spmd_types import (
+    _state,
     assert_local_type_like,
     assert_type_like,
     convert,
@@ -27,6 +28,7 @@ from spmd_types import (
     local_map,
     P,
     R,
+    register_no_typecheck,
     reinterpret_no_grad,
     rules,
     S,
@@ -1824,6 +1826,59 @@ class TestNoTypecheckCallable(unittest.TestCase):
             no_typecheck(42)
         with self.assertRaisesRegex(TypeError, "no type specifications"):
             no_typecheck(lambda x: x, out_types={})
+
+
+class TestRegisterNoTypecheck(SpmdTypeCheckedTestCase):
+    def _register(self, fn):
+        before = set(_state._NO_TYPECHECK_CODES)
+        register_no_typecheck(fn)
+        self.addCleanup(
+            _state._NO_TYPECHECK_CODES.difference_update,
+            _state._NO_TYPECHECK_CODES - before,
+        )
+
+    def _ill_typed(self):
+        x = self._generate_inputs((4,), self.pg, I).requires_grad_()
+        y = self._generate_inputs((4,), self.pg, R).requires_grad_()
+        return x, y
+
+    def test_skips_ops_under_registered_code_however_reached(self):
+        x, y = self._ill_typed()
+
+        def helper():
+            return x + y
+
+        def fn():
+            self.assertFalse(is_type_checking())
+            return helper()
+
+        class Owner:
+            def method(self):
+                return helper()
+
+        alias = fn
+        bound = Owner().method
+        self._register(fn)
+        self._register(Owner.method)
+        alias()
+        bound()
+        self.assertTrue(is_type_checking())
+        with self.assertRaisesRegex(SpmdTypeError, "cannot mix"):
+            helper()
+
+    def test_unwraps_functools_wraps(self):
+        x, y = self._ill_typed()
+
+        @torch.no_grad()
+        def fn():
+            return x + y
+
+        self._register(fn)
+        fn()
+
+    def test_rejects_non_python_callable(self):
+        with self.assertRaisesRegex(TypeError, "not a Python function"):
+            register_no_typecheck(torch.add)
 
 
 class TestThreadLocalState(SpmdTypeCheckedTestCase):
