@@ -20,6 +20,7 @@ import torch.distributed as dist
 from spmd_types import (
     assert_local_type_like,
     assert_type_like,
+    convert,
     I,
     Infer,
     local,
@@ -988,6 +989,22 @@ class TestNoGradInvariantMixing(SpmdTypeCheckedTestCase):
         y = self._typed(I, requires_grad=False)
         x.add_(y)
         self.assertIs(get_axis_local_type(x, self.pg), R)
+
+    def test_collective_src_accepts_no_grad_other_flavor(self):
+        for actual, src in ((R, I), (I, R)):
+            with self.subTest(actual=actual, src=src):
+                x = self._generate_inputs((self.WORLD_SIZE,), self.pg, actual)
+                out = convert(x, self.pg, src=src, dst=V)
+                self.assertIs(get_axis_local_type(out, self.pg), V)
+
+    def test_collective_src_rejects_grad_other_flavor(self):
+        x = self._generate_inputs((self.WORLD_SIZE,), self.pg, R)
+        x.requires_grad_(True)
+        with self.assertRaisesRegex(SpmdTypeError, "expected input type"):
+            convert(x, self.pg, src=I, dst=V)
+        with torch.no_grad():
+            out = convert(x, self.pg, src=I, dst=V)
+        self.assertIs(get_axis_local_type(out, self.pg), V)
 
 
 class TestOpLinearity(LocalTensorTestCase):

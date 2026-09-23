@@ -549,6 +549,25 @@ class TestTransitions(GlobalSigTestCase):
         self.assertIs(get_axis_local_type(x, "tp"), V)
         self.assertIs(get_axis_local_type(y, "tp"), R)
 
+    def test_no_grad_src_accepts_the_other_replicated_flavor(self):
+        x = self.typed((4, 6), dp=R, tp=R)
+        self.assertTyped(
+            rules.convert(x, "tp", src=I, dst=S(0)),
+            {"dp": R, "tp": V},
+            PartitionSpec("tp", None),
+        )
+        self.assertIs(rules.convert(x, "tp", src=I, dst=S(0), out=x), x)
+        self.assertTyped(x, {"dp": R, "tp": V}, PartitionSpec("tp", None))
+
+        x = self.typed((4,), dp=R, tp=R).requires_grad_()
+        with self.assertRaisesRegex(SpmdTypeError, "expects its input to be I"):
+            rules.convert(x, "tp", src=I, dst=S(0))
+        with torch.no_grad():
+            rules.convert(x, "tp", src=I, dst=S(0))
+        # Type-only inputs carry no grad information and stay strict.
+        with self.assertRaisesRegex(SpmdTypeError, "expects its input to be I"):
+            rules.convert(self.dims(1, tp=R), "tp", src=I, dst=S(0))
+
     def test_singleton_axis_checks_nothing_but_keeps_the_rank_change(self):
         from spmd_types._mesh_axis import MeshAxis
 

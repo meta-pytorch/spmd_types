@@ -264,6 +264,13 @@ really do want to sum a `V`, say so: `rules.all_reduce(y, g, src=V, dst=I)`.
 The hook is a claim about what the kernel computes, and the checker will not
 fill in a claim you did not write.
 
+Both the rules and the runtime collectives do accept an `R` input where `src`
+is `I` (or vice versa) when the input cannot receive a gradient
+(`requires_grad=False` or grad mode off).  `R` and `I` have the same forward
+value and differ only in backward, so for such a tensor there is no claim to
+get wrong.  This only applies to real tensors: an `NdimWithSpmdType`
+intermediate carries no gradient information and must match `src` exactly.
+
 ## Intermediates are `NdimWithSpmdType`
 
 The typing rules above return intermediates that express a typing operation,

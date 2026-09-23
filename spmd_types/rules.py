@@ -579,12 +579,15 @@ class _Transition:
             f"src={self.src!r}, dst={self.dst!r})"
         )
 
-    def _accepts_src(self, actual: PerMeshAxisLocalSpmdType) -> bool:
+    def _accepts_src(self, actual: PerMeshAxisLocalSpmdType, *, no_grad: bool) -> bool:
         # Unlike the runtime collectives, no implicit V -> P: a rule that
         # reduces a Varying value must say src=V, so the reinterpret is on
         # record.  A hook that accepted V under src=P would type a kernel
         # summing unrelated shards as if it had completed a contraction.
-        return actual is to_local_type(self.src)
+        # R and I differ only in backward, so an input that cannot receive a
+        # gradient may stand in for either.
+        expected = to_local_type(self.src)
+        return actual is expected or (no_grad and {actual, expected} == {R, I})
 
 
 def _check_pair(
@@ -653,7 +656,8 @@ def _transition(  # noqa: C901
 
     ``allowed`` describes the operation-specific ``src``/``dst`` pairs.  Once
     that declaration and ``x`` are validated, the transition checks that
-    ``x`` actually has ``src`` on ``axis``.  An axis not yet present on ``x``
+    ``x`` actually has ``src`` on ``axis``; a tensor that cannot receive a
+    gradient may be ``R`` where ``src`` is ``I`` or vice versa.  An axis not yet present on ``x``
     is established as ``src``.  A sharded source also refines an existing
     unqualified ``V`` to ``S(i)``; a singleton axis needs no stored annotation
     and skips this check.
@@ -699,7 +703,10 @@ def _transition(  # noqa: C901
     local_type = dict(get_local_type(x))
     spec = get_partition_spec(x)
     actual = local_type[mesh_axis]
-    if not tr._accepts_src(actual):
+    no_grad = isinstance(x, torch.Tensor) and not (
+        torch.is_grad_enabled() and x.requires_grad
+    )
+    if not tr._accepts_src(actual, no_grad=no_grad):
         raise SpmdTypeError(
             f"{tr!r} expects its input to be {src!r} on axis "
             f"{format_axis(mesh_axis)}, but it is {actual!r}"
@@ -735,7 +742,9 @@ def _transition(  # noqa: C901
     )
     ndim, new_spec = _rank_change(tr, ndim, new_spec)
     if out is x and out.ndim == ndim:
-        mutate_type(out, axis, src=src, dst=dst)
+        mutate_type(
+            out, axis, src=src if actual is to_local_type(src) else actual, dst=dst
+        )
         _set_partition_spec(out, new_spec)
     return _finish(_make(ndim, local_type, new_spec), out)
 

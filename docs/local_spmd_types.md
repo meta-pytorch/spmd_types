@@ -223,7 +223,8 @@ There is a special case for operands that cannot receive a gradient
 (`requires_grad=False` or `torch.no_grad()`): R and I are indistinguishable for
 them.  If mixing R and I would have otherwise errored, such operands take on the
 R/I flavor of the operands that can receive a gradient, defaulting to R when
-there are none.
+there are none.  Likewise, a collective, `reinterpret` or `convert` with
+`src=I` accepts such an operand typed R, and vice versa.
 
 To summarize:
 

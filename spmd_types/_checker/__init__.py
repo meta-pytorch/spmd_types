@@ -2880,11 +2880,16 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
 
         if resolved_axes is not None:
             # Validate input types on all resolved axes
+            no_grad = not (torch.is_grad_enabled() and x.requires_grad)
             for ax in resolved_axes:
                 input_type = local_type[ax]
                 if local_src is not None and input_type != local_src:
-                    # Allow V -> P implicit cast for reductions
-                    if not (local_src is P and input_type is V):
+                    # Allow V -> P implicit cast for reductions, and R <-> I
+                    # when x cannot receive a gradient (they differ only in
+                    # backward).
+                    if not (local_src is P and input_type is V) and not (
+                        no_grad and {input_type, local_src} == {R, I}
+                    ):
                         raise SpmdTypeError(
                             f"{func.__name__}: expected input type {local_src} on axis "
                             f"{format_axis(ax)}, got {input_type}"

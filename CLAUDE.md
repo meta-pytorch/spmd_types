@@ -146,7 +146,7 @@ op(R, V) -> V
 P + P -> P            # addition only; P * P is FORBIDDEN
 ```
 
-I cannot mix with other types, except that an R or I operand which cannot receive a gradient (`requires_grad=False` or grad mode off) is read as the other flavor when that avoids the error. P can only combine with P via addition (multilinear ops).
+I cannot mix with other types, except that an R or I operand which cannot receive a gradient (`requires_grad=False` or grad mode off) is read as the other flavor when that avoids the error; such an operand also satisfies a comms operator's `src=R` or `src=I` either way. P can only combine with P via addition (multilinear ops).
 
 ### Comms operators -- type signatures
 
