@@ -3709,6 +3709,16 @@ Hint: The non-shared axes {mesh_dp_cp} and {mesh_cp_tp} partially overlap. The o
                 self.assertIs(get_axis_local_type(result, self.cp), R)
                 self.assertIs(get_axis_local_type(result, self.tp), V)
 
+    def test_auto_reinterpret_collective_input(self) -> None:
+        """A collective reinterprets a foreign-mesh input onto the current mesh."""
+        dp, cp, tp = (normalize_axis(pg) for pg in (self.dp, self.cp, self.tp))
+        with typecheck(strict_mode="strict"):
+            x = torch.randn(4)
+            assert_type(x, {self.dp_cp: V, self.tp: R})
+            with set_current_mesh(frozenset({dp, cp, tp})):
+                result = all_reduce(x, self.cp, src=P, dst=R)
+            self.assertEqual(get_local_type(result), {dp: V, cp: R, tp: R})
+
     def test_reinterpret_mesh_flatten_unflatten(self) -> None:
         """Explicit reinterpret_mesh should allow dp,cp <-> dp_cp retagging."""
         from spmd_types._checker import reinterpret_mesh

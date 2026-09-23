@@ -22,6 +22,7 @@ from spmd_types import (
     assert_type,
     get_partition_spec,
     I,
+    MeshAxis,
     P,
     PartitionSpec,
     R,
@@ -148,6 +149,64 @@ class TestLocalEinsum(LocalSigTestCase):
         x = self.typed((4, 6), dp=R, tp=V)
         y = self.typed((4, 6), dp=R, tp=R)
         self.assertTyped(Add.apply(x, y), {"dp": R, "tp": V}, None)
+
+
+class TestCrossMesh(LocalSigTestCase):
+    def test_hook_operands_are_reinterpreted_onto_current_mesh(self):
+        class ScaleSum(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, w):
+                return x * w
+
+            @staticmethod
+            def spmd_typecheck(*, x, w):
+                y = rules.einsum("ij,j->ij", x, w)
+                return rules.all_reduce(y, "tp", src=V, dst=R)
+
+        dp_tp = MeshAxis.of(4, 1)
+        x = self.rank_map(lambda r: torch.randn(4, 6))
+        assert_type(x, {dp_tp: V})
+        w = self.typed((6,), dp=R, tp=R)
+        self.assertTyped(ScaleSum.apply(x, w), {"dp": V, "tp": R}, None)
+        self.assertEqual(dict(get_local_type(x)), {dp_tp: V})
+
+    def test_transition_on_own_axis_keeps_operand_mesh(self):
+        dp_tp = MeshAxis.of(4, 1)
+        tp = normalize_axis("tp")
+        w = self.typed((6,), dp=R, tp=I)
+        with no_typecheck():
+            w.requires_grad_()
+        x = self.rank_map(lambda r: torch.randn(4, 6))
+        assert_type(x, {dp_tp: V})
+        with set_current_mesh(frozenset({dp_tp})):
+            # {dp: R, tp: I} cannot fold into dp_tp until tp is converted.
+            w = rules.convert(w, tp, src=I, dst=R)
+            y = rules.einsum("ij,j->ij", x, w)
+        self.assertTyped(w, {"dp": R, "tp": R}, None)
+        self.assertEqual(dict(get_local_type(y)), {dp_tp: V})
+
+    def test_in_place_transition_moves_buffer_onto_current_mesh(self):
+        dp_tp = MeshAxis.of(4, 1)
+        dp, tp = normalize_axis("dp"), normalize_axis("tp")
+        x = self.rank_map(lambda r: torch.randn(4, 6))
+        assert_type(x, {dp_tp: V})
+        with set_current_mesh(frozenset({dp, tp})):
+            with self.assertRaisesRegex(SpmdTypeError, "expects its input"):
+                rules.all_reduce(x, tp, src=P, dst=R, out=x)
+            self.assertEqual(dict(get_local_type(x)), {dp_tp: V})
+            self.assertIs(rules.all_reduce(x, tp, src=V, dst=R, out=x), x)
+        self.assertTyped(x, {"dp": V, "tp": R}, None)
+
+    def test_incompatible_operand_error_names_both_meshes(self):
+        dp_tp = MeshAxis.of(4, 1)
+        w = self.typed((6,), dp=R, tp=I)
+        with set_current_mesh(frozenset({dp_tp})):
+            with self.assertRaises(SpmdTypeError) as cm:
+                rules.convert(w, dp_tp, src=I, dst=R)
+        self.assertExpectedInline(
+            str(cm.exception),
+            """rules.convert({mesh_dp,mesh_tp}, src=I, dst=R): cannot auto-reinterpret {mesh_dp, mesh_tp} onto the current mesh {{mesh_dp,mesh_tp}}. Axes {mesh_dp, mesh_tp} would need to be flattened, but mesh_dp has type R while mesh_tp has type I. Check that the operand has the local SPMD types you expect and that the current mesh is correct for this region of code.""",
+        )
 
 
 class TestMixedEinsum(GlobalSigTestCase):

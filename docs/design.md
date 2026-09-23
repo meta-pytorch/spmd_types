@@ -829,7 +829,10 @@ When a current mesh is set (via `set_current_mesh`), operands living on a
 foreign mesh presentation are implicitly reinterpreted onto the current mesh as
 the first stage of type inference (`_auto_reinterpret_cross_mesh`): the checker
 attempts a `reinterpret_mesh` onto the current mesh's axes and errors if the
-two presentations are not compatible.  Outside of a current mesh, mesh mismatch
+two presentations are not compatible.  This includes the operands of
+`spmd_typecheck` rules.  A collective or transition whose axis already appears
+on its operand is the exception: the axis names the operand's own
+presentation, so the operand is typed there and not reinterpreted.  Outside of a current mesh, mesh mismatch
 alone does not uniquely determine a target presentation, so no automatic
 conversion occurs; the user must explicitly request `reinterpret_mesh` at the
 point where a different mesh vocabulary is intended.

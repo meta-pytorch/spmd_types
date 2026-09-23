@@ -2855,10 +2855,18 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         # V when src=P, implicitly reinterpreting V as P.  The runtime
         # in _collectives.py already handles this conversion.
         local_type = get_local_type(x)
+        input_spec = get_partition_spec(x)
 
         # Resolve axis to a list of matching axes on the tensor.
         # Direct match: [axis]. Flattened decomposition: [sub1, sub2, ...].
         resolved_axes = _resolve_collective_axes(axis, local_type)
+        if resolved_axes is None:
+            # An axis already on x names x's own mesh presentation; only
+            # otherwise retag x onto the current mesh.
+            (local_type,), (input_spec,) = _auto_reinterpret_cross_mesh(
+                [local_type], [input_spec]
+            )
+            resolved_axes = _resolve_collective_axes(axis, local_type)
         collective_axes = resolved_axes or [axis]
         global_collective_axes = [
             ax for ax in collective_axes if self._is_global_axis(ax)
@@ -2914,7 +2922,6 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         _set_local_type(result, output_type)
 
         if global_collective_axes:
-            input_spec = get_partition_spec(x)
             # Find S(dim) for this axis in the input spec, validating
             # it is innermost in its multi-axis group.
             input_shard = None
