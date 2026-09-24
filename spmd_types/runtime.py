@@ -298,12 +298,118 @@ def _update_axis_in_partition_spec(  # noqa: C901
 
 
 _TensorOrSequence = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
+_TypeArg: TypeAlias = (
+    "SpmdType | PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType | PartitionSpec | None"
+)
+
+
+def _merge_types(  # noqa: C901
+    *types: _TypeArg,
+) -> tuple[dict[DeviceMeshAxis, PerMeshAxisSpmdType], PartitionSpec | None]:
+    # Not an SpmdType: SpmdType validates PartitionSpec axes as written, but
+    # assert_type drops singleton axes first, so it accepts more.
+    local_type: dict[DeviceMeshAxis, PerMeshAxisSpmdType] = {}
+    specs: list[PartitionSpec] = []
+    default: PerMeshAxisLocalSpmdType | None = None
+    for arg in types:
+        if arg is None:
+            continue
+        if isinstance(arg, PerMeshAxisLocalSpmdType):
+            if default is not None:
+                raise TypeError(
+                    f"merge_types() takes at most one bare type, got {default} "
+                    f"and {arg}."
+                )
+            default = arg
+            continue
+        if isinstance(arg, PartitionSpec):
+            specs.append(arg)
+            continue
+        if isinstance(arg, SpmdType):
+            if arg.partition_spec is not None:
+                specs.append(arg.partition_spec)
+            arg = arg.local_type
+        for axis, typ in arg.items():
+            if local_type.get(axis, typ) != typ:
+                raise SpmdTypeError(
+                    f"Conflicting types on axis {format_axis(axis)}: "
+                    f"{local_type[axis]} and {typ}"
+                )
+            local_type[axis] = typ
+    if any(s != specs[0] for s in specs) and (
+        len({normalize_partition_spec(s) for s in specs}) > 1
+    ):
+        raise SpmdTypeError(
+            f"Conflicting PartitionSpecs: {' and '.join(map(repr, specs))}"
+        )
+    spec = specs[0] if specs else None
+    if default is not None:
+        mesh = current_mesh()
+        if mesh is None:
+            raise SpmdTypeError(
+                f"A bare {default} requires an active mesh, but no current mesh "
+                "is set. Use set_mesh() or pass an explicit per-axis dict "
+                "instead."
+            )
+        named = {normalize_axis(axis) for axis in local_type}
+        if spec is not None:
+            named |= spec.axes_with_partition_spec()
+        local_type.update({axis: default for axis in mesh if axis not in named})
+    return local_type, spec
+
+
+def merge_types(*types: _TypeArg) -> SpmdType:
+    """Merge partial SPMD types into one ``SpmdType``.
+
+    Each argument is a dict of per-axis types, an ``SpmdType``, a
+    ``PartitionSpec``, a bare type such as ``R``, or ``None`` (ignored), in any
+    order. Dicts must agree on any axis they share, and PartitionSpecs must be
+    equal. Axis keys are kept as written and compared as written; ``"tp"``
+    and the tp process group naming the same axis is caught by
+    ``assert_type``.
+
+    A bare type (at most one) is a default, not a partial type: it fills the
+    current-mesh axes that nothing else names, including axes in the
+    PartitionSpec, so ``merge_types(R, {cp: V})`` is R on every axis except V
+    on ``cp``. This is the only case that reads the current mesh, and the
+    result holds the filled-in axes explicitly.
+
+    Raises:
+        SpmdTypeError: If the arguments conflict, or a bare type is given with
+            no current mesh.
+        TypeError: If more than one bare type is given.
+    """
+    return SpmdType(*_merge_types(*types))
+
+
+@overload
+def assert_type(
+    tensor: _TensorOrSequence,
+    type: PerMeshAxisSpmdTypes | SpmdType,
+    /,
+    *,
+    partition_spec: PartitionSpec | None = None,
+) -> _TensorOrSequence: ...
+
+
+@overload
+def assert_type(
+    tensor: _TensorOrSequence, type: PerMeshAxisLocalSpmdType, /
+) -> _TensorOrSequence: ...
+
+
+@overload
+def assert_type(
+    tensor: _TensorOrSequence,
+    *types: _TypeArg,
+    partition_spec: PartitionSpec | None = None,
+) -> _TensorOrSequence: ...
 
 
 @api_boundary
 def assert_type(  # noqa: C901
     tensor: _TensorOrSequence,
-    type: SpmdType | PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType,
+    *types: _TypeArg,
     partition_spec: PartitionSpec | None = None,
 ) -> _TensorOrSequence:
     """Assert or set the SPMD type on a tensor or sequence of tensors.
@@ -314,18 +420,29 @@ def assert_type(  # noqa: C901
     When ``tensor`` is a list or tuple, applies ``assert_type`` to each element
     and returns a collection of the same type.
 
-    Three calling conventions (see overloads):
+    Calling conventions, simplest first (see overloads):
 
-    1. ``assert_type(tensor, {axis: R/I/V/P, ...}, partition_spec=...)``
-       Explicit local types with optional PartitionSpec for shard metadata.
+    1. ``assert_type(tensor, {axis: R/I/V/P/S(i), ...})``
+       Per-axis types. S(i) is syntax sugar for V plus a PartitionSpec that
+       maps tensor dim ``i`` to that axis. An ``SpmdType`` may be passed in
+       place of the dict.
 
-    2. ``assert_type(tensor, {axis: S(i), ...})`` S(i) entries are automatically
-       converted to V + PartitionSpec. Cannot be combined with an explicit
-       ``partition_spec``.
+    2. ``assert_type(tensor, {axis: R/I/V/P, ...}, partition_spec=...)``
+       Explicit shard metadata instead of S(i). The two cannot be mixed.
 
     3. ``assert_type(tensor, R)`` (bare PerMeshAxisLocalSpmdType)
-       Expands to ``{axis: R for axis in current_mesh()}``. Raises
-       ``SpmdTypeError`` if no current mesh is set.
+       R on every axis of the current mesh. Raises ``SpmdTypeError`` if no
+       current mesh is set.
+
+    4. ``assert_type(tensor, *types)``
+       The general form; 1-3 are special cases. Each argument is a dict, an
+       ``SpmdType``, a bare type, a ``PartitionSpec``, or ``None`` (ignored),
+       in any order, and they are combined with ``merge_types``: dicts must
+       agree on any axis they share, and PartitionSpecs must be equal. A bare
+       type (at most one) fills the current-mesh axes nothing else names, so
+       ``assert_type(tensor, R, {cp: V})`` is R on every axis except V on
+       ``cp``. The fill happens during the call; the tensor stores the
+       resulting per-axis types.
 
     S(i) always stores a PartitionSpec regardless of whether the axis is in
     global SPMD mode. Global axes only affect whether S(i) propagates through
@@ -363,22 +480,25 @@ def assert_type(  # noqa: C901
 
     Args:
         tensor: The tensor to assert or set SPMD type on.
-        type: A dict mapping mesh axes to per-axis SPMD types.
-            Accepts R, I, V, P, or S(i). S(i) entries are syntax sugar for
-            setting V on the axis and storing a PartitionSpec that maps tensor
-            dim ``i`` to that mesh axis.
+        *types: Partial types to merge; see the calling conventions above.
         partition_spec: Optional PartitionSpec describing how tensor
             dimensions map to mesh axes for Varying dimensions. Mutually
-            exclusive with S(i) entries in ``type``.
+            exclusive with S(i) entries in ``types``.
 
     Raises:
-        SpmdTypeError: If S(i) and partition_spec are both provided,
+        SpmdTypeError: If ``types`` conflict with each other (including S(i)
+            together with a PartitionSpec),
             if partition_spec length doesn't match tensor ndim, if a type dict
             axis conflicts with partition_spec, or if a re-check has conflicting
             PartitionSpec info.
         SpmdTypeError: If existing local SPMD type doesn't match.
     """
     _mark_asserted(tensor)
+    if all(t is None or isinstance(t, PartitionSpec) for t in types):
+        raise TypeError("assert_type() requires at least one type argument.")
+    # ``type`` may still hold S(dim) entries (deferred construction); the
+    # canonicalization below resolves them against ``tensor.ndim``.
+    type, partition_spec = _merge_types(*types, partition_spec)
     if isinstance(tensor, (list, tuple)):
         result = [assert_type(t, type, partition_spec) for t in tensor]
         return builtins.type(tensor)(result)
@@ -389,29 +509,6 @@ def assert_type(  # noqa: C901
             "operates on local tensors only; DTensor tracks its own "
             "placement metadata."
         )
-
-    ############ Expand SpmdType ############
-    if isinstance(type, SpmdType):
-        if partition_spec is not None:
-            raise TypeError(
-                "assert_type() cannot take both a SpmdType and a separate "
-                "partition_spec."
-            )
-        # ``local_type`` may still hold S(dim) entries (deferred construction);
-        # the canonicalization below resolves them against ``tensor.ndim``.
-        partition_spec = type.partition_spec
-        type = type.local_type
-
-    ############ Expand bare PerMeshAxisLocalSpmdType ############
-    if isinstance(type, PerMeshAxisLocalSpmdType):
-        mesh = current_mesh()
-        if mesh is None:
-            raise SpmdTypeError(
-                f"assert_type(tensor, {type}) requires an active mesh, "
-                "but no current mesh is set. Use set_mesh() or pass an "
-                "explicit per-axis dict instead."
-            )
-        type = {axis: type for axis in mesh}
 
     ############ Validate partition_spec length ############
     if partition_spec is not None:
@@ -428,8 +525,14 @@ def assert_type(  # noqa: C901
     local_type: LocalSpmdType = {}
     axis_to_dims: dict[MeshAxis, Shard] = {}
     dim_to_axes: dict[int, list[MeshAxis]] = {}
+    written: dict[MeshAxis, PerMeshAxisSpmdType] = {}
     for axis, typ in type.items():
         axis = normalize_axis(axis)
+        if written.setdefault(axis, typ) != typ:
+            raise SpmdTypeError(
+                f"Conflicting types on axis {format_axis(axis)}: "
+                f"{written[axis]} and {typ}"
+            )
         if axis.size() == 1:
             continue  # singleton axes carry no sharding info; skip
         typ = _canonicalize_shard(typ, tensor.ndim)
@@ -440,7 +543,6 @@ def assert_type(  # noqa: C901
         else:
             local_type[axis] = typ
 
-    # Enforce overload contract: S(i) and partition_spec are mutually exclusive.
     if axis_to_dims and partition_spec is not None:
         raise SpmdTypeError(
             "Cannot use S(i) in type dict and partition_spec at the same time. "

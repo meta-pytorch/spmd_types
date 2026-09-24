@@ -917,6 +917,13 @@ dp: R}` but fail on an unannotated tensor -- same call, different behavior
 depending on the tensor's history.  Keeping `assert_type` mesh-agnostic
 avoids this.
 
+The one place `assert_type` reads the current mesh is a bare type such as
+`R`, which fills every current-mesh axis that the call's dicts leave out:
+`assert_type(x, R, {cp: V})` is R everywhere except V on `cp`.  The fill
+happens during the call and the tensor stores explicit per-axis types, so a
+later `assert_type(x, {cp: R})` checks against V, not against a stored
+default.
+
 ## Low precision and autograd
 
 We would like to address the handling of low precision dtypes and autograd in

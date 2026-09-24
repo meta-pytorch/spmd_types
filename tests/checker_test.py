@@ -55,6 +55,7 @@ from spmd_types._scalar_sentinel import _Scalar
 from spmd_types._state import is_type_checking
 from spmd_types._test_utils import LocalTensorTestCase, SpmdTypeCheckedTestCase
 from spmd_types._type_attr import get_axis_local_type, get_local_type
+from spmd_types.runtime import merge_types
 from spmd_types.types import normalize_axis, PartitionSpec, SpmdType, SpmdTypeError
 from torch.distributed._local_tensor import LocalTensorMode
 from torch.distributed.device_mesh import init_device_mesh
@@ -674,6 +675,95 @@ class TestAssertTypeBareExpansion(LocalTensorTestCase):
         x = torch.randn(4)
         with self.assertRaises(SpmdTypeError):
             assert_type(x, R)
+
+    def test_bare_type_fills_axes_the_dict_leaves_out(self):
+        """assert_type(tensor, R, {tp: V}) is V on tp and R elsewhere, in either order."""
+        dp = self.mesh.get_group("dp")
+        tp = self.mesh.get_group("tp")
+        x = torch.randn(4)
+        y = torch.randn(4)
+        with set_current_mesh(self.mesh):
+            assert_type(x, R, {tp: V})
+            assert_type(y, {"tp": V}, R)
+        for t in (x, y):
+            self.assertIs(get_axis_local_type(t, dp), R)
+            self.assertIs(get_axis_local_type(t, tp), V)
+
+    def test_dicts_merge_per_axis(self):
+        """Dicts on disjoint axes merge; a shared axis must agree."""
+        dp = self.mesh.get_group("dp")
+        tp = self.mesh.get_group("tp")
+        x = torch.randn(4)
+        assert_type(x, {dp: R}, {tp: V, dp: R})
+        self.assertIs(get_axis_local_type(x, dp), R)
+        self.assertIs(get_axis_local_type(x, tp), V)
+        with self.assertRaisesRegex(SpmdTypeError, "Conflicting types"):
+            assert_type(torch.randn(4), {tp: V}, {tp: R})
+
+    def test_bare_type_is_resolved_during_the_call(self):
+        """A later assert_type sees the filled-in axes, not a default."""
+        tp = self.mesh.get_group("tp")
+        x = torch.randn(4)
+        with set_current_mesh(self.mesh):
+            assert_type(x, R)
+            with self.assertRaises(SpmdTypeError):
+                assert_type(x, {tp: V})
+
+    def test_bare_type_skips_partition_spec_axes(self):
+        """assert_type(tensor, R, PartitionSpec(tp)) is R on dp, sharded on tp."""
+        dp = self.mesh.get_group("dp")
+        tp = self.mesh.get_group("tp")
+        x = torch.randn(3)
+        with set_current_mesh(self.mesh):
+            assert_type(x, R, PartitionSpec(tp))
+        self.assertIs(get_axis_local_type(x, dp), R)
+        self.assertIs(get_axis_local_type(x, tp), V)
+        self.assertEqual(get_partition_spec(x), PartitionSpec(normalize_axis(tp)))
+
+    def test_at_most_one_bare_type_and_partition_spec(self):
+        dp = self.mesh.get_group("dp")
+        tp = self.mesh.get_group("tp")
+        x = torch.randn(4)
+        with set_current_mesh(self.mesh):
+            with self.assertRaisesRegex(TypeError, "at most one bare type"):
+                assert_type(x, R, I)
+            assert_type(x, {dp: V}, PartitionSpec(dp), partition_spec=PartitionSpec(dp))
+            with self.assertRaisesRegex(SpmdTypeError, "Conflicting PartitionSpecs"):
+                assert_type(x, {}, PartitionSpec(dp), partition_spec=PartitionSpec(tp))
+
+
+class TestMergeTypes(LocalTensorTestCase):
+    WORLD_SIZE = 6
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.mesh = init_device_mesh("cpu", (2, 3), mesh_dim_names=("dp", "tp"))
+
+    def test_keys_are_kept_as_written(self):
+        """Without a bare type, merging needs no mesh and keeps str keys."""
+        self.assertEqual(
+            merge_types({"dp": R}, SpmdType({"tp": V}, PartitionSpec("tp"))),
+            SpmdType({"dp": R, "tp": V}, PartitionSpec("tp")),
+        )
+        self.assertEqual(
+            merge_types({"dp": S(0)}, {"dp": S(0)}), SpmdType({"dp": S(0)})
+        )
+
+    def test_conflicts(self):
+        dp = self.mesh.get_group("dp")
+        tp = self.mesh.get_group("tp")
+        with self.assertRaisesRegex(SpmdTypeError, "Conflicting types"):
+            merge_types({"dp": R}, {"dp": I})
+        with self.assertRaisesRegex(SpmdTypeError, "S\\(i\\) entries"):
+            merge_types({"dp": S(0)}, PartitionSpec("tp"))
+        with set_current_mesh(self.mesh):
+            self.assertEqual(
+                merge_types(PartitionSpec("tp"), PartitionSpec(tp)).partition_spec,
+                PartitionSpec("tp"),
+            )
+            with self.assertRaisesRegex(SpmdTypeError, "Conflicting types"):
+                assert_type(torch.randn(4), merge_types({"dp": R}, {dp: I}))
 
 
 class TestStringAxisLookup(LocalTensorTestCase, expecttest.TestCase):

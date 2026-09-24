@@ -58,6 +58,8 @@ be imported in model code without pulling in the heavy checker logic.
 ```{eval-rst}
 .. autofunction:: spmd_types.runtime.assert_type
 
+.. autofunction:: spmd_types.runtime.merge_types
+
 .. autofunction:: spmd_types.runtime.assert_local_type
 
 .. autofunction:: spmd_types.runtime.mutate_type

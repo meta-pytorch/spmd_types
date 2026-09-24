@@ -62,6 +62,7 @@ from spmd_types.runtime import (  # noqa: F401
     Infer,
     local,
     local_map,
+    merge_types,
     mutate_type,
     no_typecheck,
     register_autograd_function,
