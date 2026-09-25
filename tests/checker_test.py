@@ -766,6 +766,35 @@ class TestMergeTypes(LocalTensorTestCase):
                 assert_type(torch.randn(4), merge_types({"dp": R}, {dp: I}))
 
 
+class TestSingletonAxisConflict(LocalTensorTestCase):
+    """A size-1 (trivial) axis carries no sharding info; conflicting per-axis
+    types on it are dropped, not raised."""
+
+    WORLD_SIZE = 3
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.mesh = init_device_mesh("cpu", (1, 3), mesh_dim_names=("cp", "tp"))
+
+    def test_conflicting_types_on_singleton_axis_are_dropped(self):
+        # A parameter layout can name the trivial ``cp`` axis two ways with
+        # disagreeing types -- R (parameter placement) and S(0) (activation
+        # partition spec) -- as torchtitan's RL vLLM inference path does with
+        # context_parallel_degree=1. Since ``cp`` is size 1 it carries no
+        # sharding info, so this must not raise.
+        cp = self.mesh.get_group("cp")
+        with set_current_mesh(self.mesh):
+            assert_type(torch.randn(4), {"cp": R}, {cp: S(0)})
+
+    def test_conflicting_types_on_nontrivial_axis_still_raise(self):
+        # The singleton drop must not weaken conflict detection on real axes.
+        tp = self.mesh.get_group("tp")
+        with set_current_mesh(self.mesh):
+            with self.assertRaisesRegex(SpmdTypeError, "Conflicting types"):
+                assert_type(torch.randn(4), {"tp": R}, {tp: V})
+
+
 class TestStringAxisLookup(LocalTensorTestCase, expecttest.TestCase):
     """Test string-based mesh axis lookup in assert_type and normalize_axis."""
 

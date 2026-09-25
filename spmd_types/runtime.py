@@ -528,13 +528,13 @@ def assert_type(  # noqa: C901
     written: dict[MeshAxis, PerMeshAxisSpmdType] = {}
     for axis, typ in type.items():
         axis = normalize_axis(axis)
+        if axis.size() == 1:
+            continue  # singleton axes carry no sharding info; skip
         if written.setdefault(axis, typ) != typ:
             raise SpmdTypeError(
                 f"Conflicting types on axis {format_axis(axis)}: "
                 f"{written[axis]} and {typ}"
             )
-        if axis.size() == 1:
-            continue  # singleton axes carry no sharding info; skip
         typ = _canonicalize_shard(typ, tensor.ndim)
         if isinstance(typ, Shard):
             dim_to_axes.setdefault(typ.dim, []).append(axis)
