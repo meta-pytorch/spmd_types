@@ -66,6 +66,7 @@ from spmd_types.types import (
     PerMeshAxisLocalSpmdType,
     PerMeshAxisSpmdType,
     PerMeshAxisSpmdTypes,
+    PerMeshAxisSpmdTypesArg,
     R,
     Shard,
     shard_types_to_partition_spec,
@@ -299,7 +300,7 @@ def _update_axis_in_partition_spec(  # noqa: C901
 
 _TensorOrSequence = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 _TypeArg: TypeAlias = (
-    "SpmdType | PerMeshAxisSpmdTypes | PerMeshAxisLocalSpmdType | PartitionSpec | None"
+    SpmdType | PerMeshAxisSpmdTypesArg | PerMeshAxisLocalSpmdType | PartitionSpec | None
 )
 
 
@@ -385,7 +386,7 @@ def merge_types(*types: _TypeArg) -> SpmdType:
 @overload
 def assert_type(
     tensor: _TensorOrSequence,
-    type: PerMeshAxisSpmdTypes | SpmdType,
+    type: PerMeshAxisSpmdTypesArg | SpmdType,
     /,
     *,
     partition_spec: PartitionSpec | None = None,

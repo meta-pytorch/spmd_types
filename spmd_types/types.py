@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Sequence, TYPE_CHECKING, TypeAlias
+from typing import Any, Iterable, Protocol, Sequence, TYPE_CHECKING, TypeAlias
 
 from spmd_types._mesh_axis import MeshAxis
 
@@ -128,6 +128,17 @@ DeviceMeshAxis: TypeAlias = "MeshAxis | ProcessGroup | str"
 # Used in user-facing APIs like assert_type, where S(i) is syntax sugar
 # for setting the partition_spec.
 PerMeshAxisSpmdTypes: TypeAlias = "dict[DeviceMeshAxis, PerMeshAxisSpmdType]"
+
+
+class PerMeshAxisSpmdTypesArg(Protocol):
+    """Read-only per-axis input with covariant axis and type entries.
+
+    The APIs only iterate over items, so dicts with narrower key and value
+    types are accepted without losing validation of axis keys.
+    """
+
+    def items(self) -> Iterable[tuple[DeviceMeshAxis, PerMeshAxisSpmdType]]: ...
+
 
 # LocalSpmdType maps axis identifiers to per-axis SPMD types (R, I, V, P only).
 # This is the type stored on tensors; Shard is never stored.
