@@ -830,6 +830,50 @@ class TestGlobalSpmdPartialPromotion(GlobalSpmdTestCase):
         self.assertIs(get_axis_local_type(result, self.tp), P)
 
 
+class TestGlobalSpmdMetadataQueries(GlobalSpmdTestCase):
+    """Metadata queries on a Partial tensor are not type checked.
+
+    Mirrors a tensor-parallel transformer block: the row-parallel output
+    projection produces a ``{dp: V, tp: P}`` activation before its TP
+    reduction. Activation checkpointing libraries (e.g. torch_remat) record
+    the layout of such a tensor with ``stride()`` and ``storage_offset()``
+    when they save it, which must not be rejected as non-linear ops.
+    """
+
+    def _row_parallel_output(self):
+        # Input rows are sharded on dp and features on tp; the weight's input
+        # features are sharded on tp, so the projection is a partial sum on tp.
+        x = self._make_multi_axis_input((8, 6), {self.dp: S(0), self.tp: S(1)})
+        w = self._make_multi_axis_input((5, 6), {self.dp: R, self.tp: S(1)})
+        out = torch.nn.functional.linear(x, w)
+        self.assertIs(get_axis_local_type(out, self.tp), P)
+        self.assertEqual(get_partition_spec(out), PartitionSpec(self.dp, None))
+        return out
+
+    def test_metadata_queries_on_partial(self):
+        out = self._row_parallel_output()
+        queries = {
+            "stride": lambda t: t.stride(),
+            "stride(dim)": lambda t: t.stride(0),
+            "storage_offset": lambda t: t.storage_offset(),
+            "ndimension": lambda t: t.ndimension(),
+            "dim_order": lambda t: t.dim_order(),
+            "is_pinned": lambda t: t.is_pinned(),
+            "is_shared": lambda t: t.is_shared(),
+            "is_signed": lambda t: t.is_signed(),
+            "is_inference": lambda t: t.is_inference(),
+            "len": len,
+        }
+        for name, query in queries.items():
+            with self.subTest(query=name):
+                query(out)
+
+    def test_value_reads_on_partial_still_rejected(self):
+        out = self._row_parallel_output()
+        with self.assertRaisesRegex(SpmdTypeError, "Partial"):
+            torch.relu(out)
+
+
 # =============================================================================
 # I fallback to local SPMD inference
 # =============================================================================

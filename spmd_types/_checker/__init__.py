@@ -2474,22 +2474,32 @@ def _check_backward_loss_type(args: tuple, kwargs: dict) -> None:
 # collectives) are caught rather than silently bypassing the checker.
 #
 # Note: property accesses like .shape/.ndim are handled by the __get__
-# check in __torch_function__, and .stride() is in PyTorch's
-# get_ignored_functions() so it never reaches __torch_function__ at all.
+# check in __torch_function__. Methods must be listed here even when PyTorch's
+# get_ignored_functions() names them: .stride() is listed there but still
+# reaches torch function modes.
 _PASSTHROUGH = {
     # Autograd bookkeeping
     torch.Tensor.requires_grad_,
     torch.Tensor.retain_grad,
     # Metadata queries (return non-tensor values)
+    torch.Tensor.__len__,
     torch.Tensor.dim,
+    torch.Tensor.dim_order,
     torch.Tensor.element_size,
     torch.Tensor.get_device,
     torch.Tensor.is_complex,
     torch.Tensor.is_contiguous,
     torch.Tensor.is_floating_point,
+    torch.Tensor.is_inference,
+    torch.Tensor.is_pinned,
+    torch.Tensor.is_shared,
+    torch.Tensor.is_signed,
+    torch.Tensor.ndimension,
     torch.Tensor.nelement,
     torch.Tensor.numel,
     torch.Tensor.size,
+    torch.Tensor.storage_offset,
+    torch.Tensor.stride,
     torch.Tensor.untyped_storage,
     torch.numel,
 }
