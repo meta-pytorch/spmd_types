@@ -1328,6 +1328,28 @@ class TestAssertTypeLikePartitionSpec(LocalTensorTestCase):
         self.assertEqual(get_local_type(out), get_local_type(x))
         self.assertIsNone(get_partition_spec(out))
 
+    def test_assert_local_type_like_override_keyed_by_process_group(self):
+        # A row-parallel linear (as in TorchTitan's tensor parallelism) types
+        # its output from its input, keying the override by the TP group.
+        x = torch.randn(4, 3)
+        out = torch.empty(4, 5)
+        assert_type(x, {self.dp: V, self.tp: V})
+
+        assert_local_type_like(out, x, {self.tp: P})
+
+        self.assertIs(get_axis_local_type(out, self.dp), V)
+        self.assertIs(get_axis_local_type(out, self.tp), P)
+
+    def test_assert_type_like_override_keyed_by_process_group(self):
+        x = torch.randn(4, 3)
+        out = torch.empty_like(x)
+        assert_type(x, {self.dp: S(0), self.tp: V})
+
+        assert_type_like(out, x, {self.tp: R})
+
+        self.assertIs(get_axis_local_type(out, self.tp), R)
+        self.assertEqual(get_partition_spec(out), get_partition_spec(x))
+
 
 class TestSpmdType(LocalTensorTestCase):
     """Test SpmdType validation and resolution via assert_type."""

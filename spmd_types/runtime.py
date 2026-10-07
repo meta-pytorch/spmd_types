@@ -681,8 +681,11 @@ def assert_type_like(
 
         assert_type_like(out, x, {mesh.CP: R})
     """
-    full_type = {**get_local_type(source), **(overrides or {})}
-    assert_type(tensor, full_type, get_partition_spec(source))
+    assert_type(
+        tensor,
+        _local_type_with_overrides(source, overrides),
+        get_partition_spec(source),
+    )
 
 
 def assert_local_type_like(
@@ -696,8 +699,18 @@ def assert_local_type_like(
     propagated -- use this when only the local SPMD types should be carried
     over and the result is not (or not yet) globally sharded.
     """
-    full_type = {**get_local_type(source), **(overrides or {})}
-    assert_type(tensor, full_type)
+    assert_type(tensor, _local_type_with_overrides(source, overrides))
+
+
+def _local_type_with_overrides(
+    source: torch.Tensor,
+    overrides: dict[MeshAxis, LocalSpmdType] | None,
+) -> LocalSpmdType:
+    # The source's type is keyed by normalized axes, while callers often key
+    # overrides by process group. Normalize them so an override replaces the
+    # source's entry for the same axis instead of conflicting with it.
+    normalized = {normalize_axis(axis): typ for axis, typ in (overrides or {}).items()}
+    return {**get_local_type(source), **normalized}
 
 
 # =============================================================================
