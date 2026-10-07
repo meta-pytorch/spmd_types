@@ -452,7 +452,10 @@ def _replicate_to_varying(
         chunks = torch.chunk(x, world_size, dim=split_dim)
         result = chunks[rank].contiguous()
     if result.untyped_storage() is x.untyped_storage():
-        return result._lazy_clone()
+        # TODO: Switch back to result._lazy_clone() (CoW) once we are on a
+        # PyTorch version without the CoW bug:
+        # https://github.com/pytorch/pytorch/issues/200155
+        return result.clone()
     return result
 
 
