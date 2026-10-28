@@ -851,7 +851,10 @@ def all_to_all(
     dst: PerMeshAxisSpmdType = V,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor | NdimWithSpmdType:
-    """Type of ``spmd.all_to_all(x, axis, src=, dst=)``: ``V|S(i) -> V|S(j)``."""
+    """Type of ``spmd.all_to_all(x, axis, src=, dst=)``: ``V|S(i) -> V|S(j)``.
+
+    ``i == j`` is accepted, as at runtime; see ``spmd.all_to_all`` for its
+    global semantics (a block permutation of the global tensor)."""
     return _transition(x, "all_to_all", axis, src, dst, [("V|S", "V|S")], out=out)
 
 

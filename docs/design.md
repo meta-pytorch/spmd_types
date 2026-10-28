@@ -689,6 +689,15 @@ rank (you can use those versions by dropping into local SPMD, and then when
 returning to global SPMD explicitly specifying what your new desired global SPMD
 type is).
 
+The Shard variants also have defined global semantics: each explicit
+collective is an operation on the global tensor, which we define to coincide
+with what the collective physically does.  This operation may depend on the
+mesh axis argument (including its size) and need not preserve the global
+value.  For example, `all_to_all(S(i),S(j))` with `i != j` reshards without
+changing the global tensor, but `all_to_all(S(i),S(i))` block-permutes it while
+keeping the `S(i)` type; see `_collectives.py::all_to_all`.  `redistribute` is
+the operator that is always value preserving.
+
 The global SPMD interpretation of convert (when it is defined for global SPMD)
 is straightforward: it is the identity function.
 

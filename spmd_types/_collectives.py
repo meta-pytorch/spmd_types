@@ -1045,6 +1045,7 @@ def all_to_all(
     ::
 
         def all_to_all_spec(xs, src, dst):
+            n = mesh_axis_size
             match src, dst:
                 case V, V:
                     x = torch.stack(xs)
@@ -1052,8 +1053,13 @@ def all_to_all(
                     return x.unbind()
 
                 case S(i), S(j):
-                    x = torch.concat(xs, i)
-                    return x.chunk(mesh_axis_size, j)
+                    # Every rank splits its tensor into n chunks on dim j and
+                    # sends chunk r to rank r; rank r concatenates the chunks
+                    # it receives on dim i, in source rank order.
+                    return [
+                        torch.concat([x.chunk(n, j)[r] for x in xs], i)
+                        for r in range(n)
+                    ]
 
     The varying and shard versions of ``all_to_all`` are pretty different (even
     though under the hood they both have an all-to-all communication pattern),
@@ -1062,8 +1068,33 @@ def all_to_all(
     * ``all_to_all(V,V)`` transposes the logical mesh axis with the dim 0 local
       tensor axis.
 
-    * ``all_to_all(S(i),S(j))`` intuitively unshards the tensor on dim i, and
-      then reshards it on dim j (but skips actually doing the all-gather).
+    * ``all_to_all(S(i),S(j))`` with ``i != j`` intuitively unshards the tensor
+      on dim i, and then reshards it on dim j (but skips actually doing the
+      all-gather).  The global tensor is preserved:
+      ``torch.concat(ys, j) == torch.concat(xs, i)``.
+
+    * ``all_to_all(S(i),S(i))`` does the same exchange with split and concat on
+      the same dim.  The output is still ``S(i)``, but the global tensor is
+      block-permuted: view global dim i as ``n * n`` equal blocks indexed by
+      (source rank, destination rank); the exchange swaps the two indices.
+      With ``x = torch.concat(xs, i)`` and ``y = torch.concat(ys, i)``::
+
+          y = x.unflatten(i, (n, n, -1)).transpose(i, i + 1).flatten(i, i + 2)
+
+      For example, if two ranks hold ``[0, 1, 2, 3]`` and ``[4, 5, 6, 7]``,
+      they end up with ``[0, 1, 4, 5]`` and ``[2, 3, 6, 7]``: the global tensor
+      goes from ``[0, 1, 2, 3, 4, 5, 6, 7]`` to ``[0, 1, 4, 5, 2, 3, 6, 7]``.
+      This is a valid global SPMD operation.  ``S(i)`` says how the global
+      tensor is reconstructed from the local tensors; it does not promise that
+      a collective leaves the global value unchanged.  Each explicit collective
+      defines its own operation on the global tensor, which may depend on the
+      size of the mesh axis.  Use ``redistribute`` to change the type while
+      preserving the global value; ``redistribute(S(i),S(i))`` is a no-op.
+
+    With ``input_split_sizes``/``output_split_sizes`` (all-to-all-v), the
+    exchange is the same on dim 0 except that rank s sends its
+    ``input_split_sizes[r]`` rows to rank r, so in general it moves blocks of
+    the global tensor rather than preserving it.
 
     ::
 
@@ -1122,7 +1153,8 @@ def all_to_all(
         [C0, C1, C2]      [A2, B2, C2]
 
     ``all_to_all(S(i),S(j)): S(i) -> S(j)``, the backwards is
-    ``all_to_all(S(j),S(i)): S(j) -> S(i)``.
+    ``all_to_all(S(j),S(i)): S(j) -> S(i)``.  When ``i == j`` this is the same
+    block transpose, which is its own inverse.
     """
     pg = _pg_for_axis(axis)
     if has_torch_function_unary(x):
@@ -1154,7 +1186,7 @@ def all_to_all(
 
     if isinstance(src, Shard) and isinstance(dst, Shard):
         # S(i) -> S(j): physically split on new shard dim (j), concat on old (i).
-        # Conceptual spec: concat(xs, i) then chunk(ws, j).
+        # This preserves the global tensor only when i != j; see the docstring.
         if split_dim is not None and split_dim != dst.dim:
             raise ValueError(
                 f"all_to_all S({src.dim})->S({dst.dim}) got split_dim={split_dim} "
@@ -1250,7 +1282,11 @@ def redistribute(  # noqa: C901
         redistribute(P,R)       =   all_reduce(P,R)
         redistribute(P,I)       =   all_reduce(P,I)
         redistribute(P,S(i))    =   reduce_scatter(P,S(i))
-        redistribute(S(i),S(j)) =   all_to_all(S(i),S(j))
+        redistribute(S(i),S(j)) =   all_to_all(S(i),S(j))     (i != j)
+        redistribute(S(i),S(i)) =   x                         (no-op)
+
+    ``redistribute(S(i),S(i))`` does not route to ``all_to_all(S(i),S(i))``,
+    which block-permutes the global tensor (see ``all_to_all``).
 
     These only work if the mesh axis is the LAST to shard a particular tensor
     dimension.

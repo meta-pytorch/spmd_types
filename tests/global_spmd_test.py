@@ -40,6 +40,7 @@ from spmd_types import (
     R,
     redistribute,
     reduce_scatter,
+    rules,
     S,
     set_current_mesh,
     V,
@@ -163,6 +164,18 @@ class GlobalSpmdTestCase(LocalTensorTestCase):
         types = {self.tp: R, self.dp: R}
         types[axis] = typ
         assert_type(result, types)
+        return result
+
+    def _shard_global(self, global_x, dim):
+        """Shard ``global_x`` on ``dim`` over tp (replicated over dp)."""
+        n = self.AXIS_SIZE
+        chunks = global_x.chunk(n, dim)
+        mesh = self.mesh.mesh
+        tp_index = {
+            int(mesh[e, d, t]): t for e in range(n) for d in range(n) for t in range(n)
+        }
+        result = self.rank_map(lambda r: chunks[tp_index[r]].clone())
+        assert_type(result, {self.tp: S(dim), self.dp: R})
         return result
 
     def _make_multi_axis_input(self, shape, types):
@@ -1224,6 +1237,54 @@ class TestGlobalSpmdDirectCollectives(GlobalSpmdTestCase):
         y = redistribute(x_p, self.tp_pg, src=P, dst=S(0))
         global_after = _to_global(y, S(0), self.tp)
         torch.testing.assert_close(global_after, global_before)
+
+    def test_all_to_all_s0_to_s1_preserves_global(self):
+        """all_to_all(S(0), S(1)) reshards without changing the global tensor."""
+        n = self.AXIS_SIZE
+        global_x = torch.arange(2 * n * 3 * n, dtype=torch.float).reshape(2 * n, 3 * n)
+        x = self._shard_global(global_x, 0)
+        y = all_to_all(x, self.tp_pg, src=S(0), dst=S(1))
+        self.assertEqual(get_partition_spec(y), PartitionSpec(None, self.tp))
+        torch.testing.assert_close(_to_global(y, S(1), self.tp), global_x)
+
+    def test_all_to_all_same_shard_dim_permutes_global(self):
+        """all_to_all(S(0), S(0)) is accepted and stays S(0), but its global
+        semantics is the physical exchange: a block transpose of the global
+        tensor, not the identity."""
+        n = self.AXIS_SIZE
+        global_x = torch.arange(n * n * 2 * 3, dtype=torch.float).reshape(n * n * 2, 3)
+        x = self._shard_global(global_x, 0)
+        y = all_to_all(x, self.tp_pg, src=S(0), dst=S(0))
+        self.assertEqual(get_partition_spec(y), PartitionSpec(self.tp, None))
+        # The type-only rule agrees with the runtime checker.
+        self.assertEqual(
+            get_partition_spec(rules.all_to_all(x, self.tp_pg, src=S(0), dst=S(0))),
+            get_partition_spec(y),
+        )
+        expected = global_x.unflatten(0, (n, n, -1)).transpose(0, 1).flatten(0, 2)
+        self.assertFalse(torch.equal(expected, global_x))
+        torch.testing.assert_close(_to_global(y, S(0), self.tp), expected)
+
+    def test_all_to_all_same_shard_dim_negative_alias(self):
+        """S(1) and S(-1) name the same dim of a 2D tensor, so the call is the
+        same-dim exchange on dim 1."""
+        n = self.AXIS_SIZE
+        global_x = torch.arange(4 * n * n * 2, dtype=torch.float).reshape(4, n * n * 2)
+        x = self._shard_global(global_x, 1)
+        y = all_to_all(x, self.tp_pg, src=S(1), dst=S(-1))
+        self.assertEqual(get_partition_spec(y), PartitionSpec(None, self.tp))
+        expected = global_x.unflatten(1, (n, n, -1)).transpose(1, 2).flatten(1, 3)
+        self.assertFalse(torch.equal(expected, global_x))
+        torch.testing.assert_close(_to_global(y, S(1), self.tp), expected)
+
+    def test_redistribute_same_shard_dim_preserves_global(self):
+        """redistribute(S(0), S(0)) is a no-op, unlike all_to_all(S(0), S(0))."""
+        n = self.AXIS_SIZE
+        global_x = torch.arange(n * n * 2 * 3, dtype=torch.float).reshape(n * n * 2, 3)
+        x = self._shard_global(global_x, 0)
+        y = redistribute(x, self.tp_pg, src=S(0), dst=S(0))
+        self.assertEqual(get_partition_spec(y), PartitionSpec(self.tp, None))
+        torch.testing.assert_close(_to_global(y, S(0), self.tp), global_x)
 
     # -- Error tests ----------------------------------------------------------
 

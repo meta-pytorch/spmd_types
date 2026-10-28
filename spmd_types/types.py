@@ -70,7 +70,9 @@ class Shard:
     specifying how ranks relate to a global tensor, Shard(dim) additionally
     says "the global tensor can be reconstructed by concatenating the local
     tensors along dimension ``dim``."  This is analogous to DTensor's
-    ``Shard(dim)`` placement.
+    ``Shard(dim)`` placement.  It describes how to reconstruct the global
+    tensor, not that an operation from ``S(i)`` to ``S(i)`` preserves its value
+    (e.g., ``all_to_all(S(i), S(i))`` block-permutes the global tensor).
 
     This is not a true type (notice it doesn't inherit from PerMeshAxisLocalSpmdType)
     but it is accepted at any src/dst argument and, from a typing perspective,

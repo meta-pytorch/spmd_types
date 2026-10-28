@@ -309,7 +309,10 @@ explicit `placements=` only for a configuration enumeration cannot construct.
 For rulecheck to work, the autograd function in question must be "mesh
 invariant" (that is, it can work with an arbitrarily sized device mesh--in
 particular, it must be possible to run it on a mesh of size one, which is how
-the reference value is computed.)
+the reference value is computed.)  A kernel whose global operation depends on
+the mesh size, such as one that calls `all_to_all(S(i), S(i))` (a block
+permutation that is the identity only on a mesh of size one), is not mesh
+invariant, so `rulecheck` cannot check it.
 
 It is easiest to use `rulecheck` for local operations, which run on plain
 per-rank tensors with no distributed setup.  A kernel that calls collectives
