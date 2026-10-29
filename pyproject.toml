@@ -61,7 +61,21 @@ quote-style = "double"
 testpaths = ["tests"]
 python_files = ["*_test.py"]
 
+# ops imports spmd_types from most of its interfaces and farm from its
+# gradient code, so an unscoped import graph selects their suites, GPU plans
+# included, for every change here. Import-graph selection stays inside this
+# tree; the tests below opt back in.
+[tool.test-selector.graph-dependents]
+"**" = ["**"]
+
 [tool.test-selector.extra-deps]
+
+# The farm tests that import spmd_types directly.
+"**" = [
+    "../farm/farm/model/tests/test_input_side_fsdp_order.py",
+    "../farm/farm/optimize/tests/test_grad_clipping_shared_tensor.py",
+    "../farm/farm/optimize/tests/test_replication_metadata.py",
+]
 
 # BEGIN GENERATED buck-manual-deps -- do not edit by hand
 # Regenerate: export_buck_manual_deps.py
