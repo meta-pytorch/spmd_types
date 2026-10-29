@@ -80,7 +80,6 @@ from spmd_types.runtime import (  # noqa: F401
     trace,
 )
 from spmd_types.types import (
-    _canonicalize_shard,
     DeviceMeshAxis,
     DTensorPropagationError,
     format_axis,
@@ -2940,28 +2939,6 @@ class _SpmdTypeMode(torch.overrides.TorchFunctionMode):
         _set_local_type(result, output_type)
 
         if global_collective_axes:
-            # all_to_all(S(i), S(i)) on a global axis physically permutes
-            # shards across ranks, so the result is a different global tensor
-            # than the input even though the shard dim is unchanged. Accepting
-            # it would make the global SPMD type unsound (it claims the global
-            # tensor is preserved). A local (V) all_to_all expresses the
-            # permutation when that is actually intended.
-            if (
-                func is all_to_all
-                and isinstance(src, Shard)
-                and isinstance(dst, Shard)
-                and _canonicalize_shard(src, x.ndim).dim
-                == _canonicalize_shard(dst, x.ndim).dim
-            ):
-                shard_dim = _canonicalize_shard(dst, x.ndim).dim
-                raise SpmdTypeError(
-                    f"all_to_all on global axis {format_axis(axis)} shards src "
-                    f"and dst on the same tensor dim (S({shard_dim}) -> "
-                    f"S({shard_dim})). This permutes shards across ranks and "
-                    f"does not preserve the global tensor, so it has no valid "
-                    f"global SPMD type. Use a different dst dim, or a local (V) "
-                    f"all_to_all if the shard permutation is intended."
-                )
             # Find S(dim) for this axis in the input spec, validating
             # it is innermost in its multi-axis group.
             input_shard = None

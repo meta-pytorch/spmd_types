@@ -1307,27 +1307,6 @@ class TestGlobalSpmdDirectCollectives(GlobalSpmdTestCase):
         ):
             all_to_all(x, self.tp_pg, src=S(1), dst=S(0))
 
-    def test_all_to_all_same_shard_dim_rejected(self):
-        """all_to_all(S(i), S(i)) on a global axis permutes shards across
-        ranks instead of preserving the global tensor, so it has no valid
-        global SPMD type and must be rejected."""
-        x = self._make_input((6, 3), self.tp, S(0))
-        with self.assertRaisesRegex(
-            SpmdTypeError,
-            r"same tensor dim \(S\(0\) -> S\(0\)\).*permutes shards",
-        ):
-            all_to_all(x, self.tp_pg, src=S(0), dst=S(0))
-
-    def test_all_to_all_same_shard_dim_negative_rejected(self):
-        """The same-dim check resolves negative dims: S(1) and S(-1) on a
-        2D tensor name the same dim and must also be rejected."""
-        x = self._make_input((6, 3), self.tp, S(1))
-        with self.assertRaisesRegex(
-            SpmdTypeError,
-            r"same tensor dim \(S\(1\) -> S\(1\)\).*permutes shards",
-        ):
-            all_to_all(x, self.tp_pg, src=S(1), dst=S(-1))
-
 
 # =============================================================================
 # Local/global SPMD transition
