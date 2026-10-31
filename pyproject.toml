@@ -100,6 +100,10 @@ python_files = ["*_test.py"]
 # members build against the venv (the root's `no-build-isolation-package`), so
 # the backend has to be in a default group for `uv sync` to install it first.
 build = ["setuptools", "wheel"]
+# What the tests import beyond the package itself; the export runs them in
+# this project's uv env.
+# @tbd-training-enable: dev = ["expecttest", "pytest", "torch"]
 
 [tool.uv]
-default-groups = ["build"]
+default-groups = ["build"] # @tbd-training-disable
+# @tbd-training-enable: default-groups = ["build", "dev"]
