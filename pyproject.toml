@@ -92,6 +92,7 @@ python_files = ["*_test.py"]
     "../../llama4x/projects/experimental/rtai_avatar/pumpkin/sythetic_data/t2av/conversation_landscape_style_r5_v21.py",
     "../ops/interfaces/attn/triton_attention_fp32.py",
     "../ops/interfaces/gemm/gemm.py",
+    "../rl/projects/rvg/data/data_pipeline/kimi_labeling.py",
 ]
 # END GENERATED buck-manual-deps
 
