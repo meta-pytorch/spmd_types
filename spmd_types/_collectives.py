@@ -641,7 +641,10 @@ class _ReduceScatterStack(torch.autograd.Function):
         # NCCL reduce_scatter_tensor always scatters along dim 0, so move
         # scatter_dim into position 0 when it isn't already there.
         if scatter_dim != 0:
-            x = x.movedim(scatter_dim, 0).contiguous()
+            x = x.movedim(scatter_dim, 0)
+        # NCCL reduce_scatter_tensor reads the input as contiguous without
+        # checking; incoming gradients (e.g. from sum()) can be expanded views.
+        x = x.contiguous()
         result = x.new_empty([1] + list(x.shape[1:]))
         _dist.dist.reduce_scatter_tensor(
             result, x, op=_dist.dist.ReduceOp.SUM, group=pg
@@ -916,7 +919,9 @@ class _AllToAllStack(torch.autograd.Function):
         ctx.backward_options = dtype_options.backward_options
         x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
-        input_chunks = list(torch.unbind(x, dim=split_dim))
+        # Process groups require contiguous chunks; unbind along a non-zero
+        # split_dim returns strided views.
+        input_chunks = [c.contiguous() for c in torch.unbind(x, dim=split_dim)]
         output_chunks = [
             torch.empty_like(input_chunks[0]) for _ in range(len(input_chunks))
         ]

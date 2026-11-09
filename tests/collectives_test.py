@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed._functional_collectives as funcol
 from spmd_types import (
+    _dist,
     all_gather,
     all_reduce,
     all_to_all,
@@ -843,6 +844,78 @@ class TestAllToAllMultiDim(LocalTensorTestCase):
         for r in range(self.WORLD_SIZE):
             result_tensor = result._local_tensors[r]
             self.assertEqual(result_tensor.shape, (3, 2))
+
+
+class _ContiguityCheckingDist:
+    """A torch.distributed proxy that rejects strided collective inputs.
+
+    LocalTensorMode accepts any strides, but NCCL rejects strided
+    all_to_all chunks and reads reduce_scatter_tensor inputs as contiguous
+    without checking, so emulate that requirement here.
+    """
+
+    def __init__(self, test):
+        self._test = test
+
+    def __getattr__(self, name):
+        return getattr(dist, name)
+
+    def reduce_scatter_tensor(self, output, input, *args, **kwargs):
+        self._test.assertTrue(input.is_contiguous(), "reduce_scatter_tensor input")
+        return dist.reduce_scatter_tensor(output, input, *args, **kwargs)
+
+    def all_to_all(self, output_list, input_list, *args, **kwargs):
+        for t in input_list:
+            self._test.assertTrue(t.is_contiguous(), "all_to_all input chunk")
+        return dist.all_to_all(output_list, input_list, *args, **kwargs)
+
+
+class TestCollectivesContiguousInputs(LocalTensorTestCase):
+    """Collectives hand only contiguous tensors to the process group."""
+
+    def setUp(self):
+        super().setUp()
+        _dist.set_dist(_ContiguityCheckingDist(self))
+        self.addCleanup(_dist.set_dist, None)
+
+    def test_reduce_scatter_stack_non_contiguous(self):
+        """reduce_scatter(dst=V, scatter_dim=0) makes a strided input contiguous."""
+        x = self._generate_inputs((6, self.WORLD_SIZE), self.pg, P)
+        expected = sum(x._local_tensors[r].t().clone() for r in range(self.WORLD_SIZE))
+
+        with typecheck():
+            xt = x.t()
+            self.assertFalse(xt.is_contiguous())
+            result = reduce_scatter(xt, self.pg, src=P, dst=V, scatter_dim=0)
+
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(result._local_tensors[r], expected[r])
+
+    def test_all_gather_stack_backward_expanded_grad(self):
+        """all_gather(V,R) backward reduce-scatters an expanded (stride-0) gradient."""
+        x = self._generate_inputs((3, 5), self.pg, V).requires_grad_()
+        grad = self._generate_inputs((), self.pg, P)
+        expected = sum(grad._local_tensors[r] for r in range(self.WORLD_SIZE))
+
+        with typecheck():
+            all_gather(x, self.pg, src=V, dst=R).sum().backward(grad)
+
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(x.grad._local_tensors[r], expected.expand(3, 5))
+
+    def test_all_to_all_stack_nonzero_split_dim(self):
+        """all_to_all(V,V) with split_dim != 0 sends contiguous chunks."""
+        x = self._generate_inputs((3, self.WORLD_SIZE), self.pg, V)
+
+        with typecheck():
+            result = all_to_all(x, self.pg, src=V, dst=V, split_dim=1, concat_dim=0)
+
+        # Rank r receives column r of every rank's input, stacked along dim 0.
+        for r in range(self.WORLD_SIZE):
+            expected = torch.stack(
+                [x._local_tensors[s][:, r] for s in range(self.WORLD_SIZE)]
+            )
+            torch.testing.assert_close(result._local_tensors[r], expected)
 
 
 class TestRawDistCollective(LocalTensorTestCase):
