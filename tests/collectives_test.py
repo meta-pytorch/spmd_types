@@ -19,6 +19,7 @@ from spmd_types import (
     all_gather,
     all_reduce,
     all_to_all,
+    convert,
     I,
     P,
     R,
@@ -140,6 +141,33 @@ class TestAllReduce(LocalTensorTestCase):
                 input_ptrs[r],
                 f"rank {r}: inplace result should share storage with input",
             )
+
+    def test_all_reduce_non_contiguous(self):
+        """all_reduce accepts non-contiguous inputs on the out-of-place path."""
+        x = self._generate_inputs((4, 6), self.pg, P)
+        expected_sum = sum(
+            x._local_tensors[r].t().clone() for r in range(self.WORLD_SIZE)
+        )
+
+        with typecheck():
+            xt = x.t()
+            self.assertFalse(xt.is_contiguous())
+            result = all_reduce(xt, self.pg, src=P, dst=R)
+
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(result._local_tensors[r], expected_sum)
+
+    def test_convert_i_to_r_backward_expanded_grad(self):
+        """convert(I,R) backward all-reduces an expanded (stride-0) gradient."""
+        x = self._generate_inputs((4, 6), self.pg, I).requires_grad_()
+        grad = self._generate_inputs((), self.pg, P)
+        expected = sum(grad._local_tensors[r] for r in range(self.WORLD_SIZE))
+
+        with typecheck():
+            convert(x, self.pg, src=I, dst=R).sum().backward(grad)
+
+        for r in range(self.WORLD_SIZE):
+            torch.testing.assert_close(x.grad._local_tensors[r], expected.expand(4, 6))
 
     def test_all_reduce_type_mismatch(self):
         """all_reduce raises SpmdTypeError when input type doesn't match src."""

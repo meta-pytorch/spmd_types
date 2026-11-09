@@ -68,11 +68,12 @@ class _AllReduce(torch.autograd.Function):
         ctx.backward_options = dtype_options.backward_options
         if inplace:
             assert dtype_options.op_dtype == x.dtype
+            # c10d reduces x's own storage, which must be contiguous.
+            # funcol.all_reduce copies strided inputs itself.
+            assert x.is_contiguous(), "inplace all_reduce input must be contiguous"
         else:
             x = _apply_op_dtype(x, dtype_options.op_dtype)
         pg = axis
-        # TODO: check if contiguous assertion is really necessary
-        assert x.is_contiguous(), "all_reduce input must be contiguous"
         # TODO: check if world_size == 1 short-circuit is really necessary
         if _dist.dist.get_world_size(pg) == 1:
             if inplace:
