@@ -402,7 +402,7 @@ def reinterpret(  # noqa: C901
         input_dtype=x.dtype,
         requires_grad=x.requires_grad,
         async_op=async_op,
-        input_is_leaf=x.requires_grad and x.grad_fn is None,
+        input_is_leaf=x.requires_grad and x.is_leaf,
     )
 
     if src is R and dst is V:
@@ -1099,7 +1099,7 @@ def convert(  # noqa: C901
         input_dtype=x.dtype,
         requires_grad=x.requires_grad,
         async_op=async_op,
-        input_is_leaf=x.requires_grad and x.grad_fn is None,
+        input_is_leaf=x.requires_grad and x.is_leaf,
     )
 
     if src_base is R and dst_base is V:
@@ -1184,6 +1184,7 @@ def shard(
     )
 
 
+@api_boundary
 def invariant_to_replicate(
     x,
     axis: DeviceMeshAxis,
@@ -1245,6 +1246,6 @@ def invariant_to_replicate(
         input_dtype=x.dtype,
         requires_grad=x.requires_grad,
         async_op=async_op,
-        input_is_leaf=x.requires_grad and x.grad_fn is None,
+        input_is_leaf=x.requires_grad and x.is_leaf,
     )
     return _InvariantToReplicate.apply(x, axis, dtype_options)

@@ -449,5 +449,101 @@ class TestDynamoCollectives(unittest.TestCase):
         _assert_dynamo_ok(self, f, torch.randn(4))
 
 
+class TestDynamoNonLeafInputs(unittest.TestCase):
+    """Ops on non-leaf tensors that require grad, as in training.
+
+    Reading ``.grad_fn`` on such a tensor is a Dynamo graph break, which is
+    fatal under ``fullgraph=True``.
+    """
+
+    WORLD_SIZE = 3
+
+    @classmethod
+    def setUpClass(cls):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        _reset()
+        store = FakeStore()
+        dist.init_process_group(
+            backend="fake", rank=0, world_size=cls.WORLD_SIZE, store=store
+        )
+        cls.pg = dist.distributed_c10d._get_default_group()
+
+    @classmethod
+    def tearDownClass(cls):
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        _reset()
+
+    def test_all_reduce(self):
+        """all_reduce(P, R) on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return all_reduce(x * 2, pg, src=P, dst=R)
+
+        _assert_dynamo_ok(self, f, torch.randn(4, requires_grad=True))
+
+    def test_all_gather(self):
+        """all_gather(S(0), R) on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return all_gather(x * 2, pg, src=S(0), dst=R)
+
+        _assert_dynamo_ok(self, f, torch.randn(4, requires_grad=True))
+
+    def test_reduce_scatter(self):
+        """reduce_scatter(P, S(0)) on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return reduce_scatter(x * 2, pg, src=P, dst=S(0))
+
+        # check_result=False: fake backend's reduce_scatter_tensor is nondeterministic
+        _assert_dynamo_ok(
+            self,
+            f,
+            torch.randn(self.WORLD_SIZE * 4, requires_grad=True),
+            check_result=False,
+        )
+
+    def test_reinterpret(self):
+        """reinterpret(V, P) on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return reinterpret(x * 2, pg, src=V, dst=P)
+
+        _assert_dynamo_ok(self, f, torch.randn(4, requires_grad=True))
+
+    def test_convert(self):
+        """convert(R, S(0)) on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return convert(x * 2, pg, src=R, dst=S(0))
+
+        _assert_dynamo_ok(self, f, torch.randn(self.WORLD_SIZE * 4, requires_grad=True))
+
+    def test_convert_I_R(self):
+        """convert(I, R), whose backward is a collective, on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return convert(x * 2, pg, src=I, dst=R)
+
+        _assert_dynamo_ok(self, f, torch.randn(4, requires_grad=True))
+
+    def test_invariant_to_replicate(self):
+        """invariant_to_replicate() on a non-leaf input should trace."""
+        pg = self.pg
+
+        def f(x):
+            return invariant_to_replicate(x * 2, pg)
+
+        _assert_dynamo_ok(self, f, torch.randn(4, requires_grad=True))
+
+
 if __name__ == "__main__":
     unittest.main()

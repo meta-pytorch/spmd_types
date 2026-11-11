@@ -242,7 +242,7 @@ def all_reduce(
             input_dtype=x.dtype,
             requires_grad=x.requires_grad,
             async_op=async_op,
-            input_is_leaf=x.requires_grad and x.grad_fn is None,
+            input_is_leaf=x.requires_grad and x.is_leaf,
             inplace=inplace,
         )
         return _AllReduce.apply(x, pg, dst, inplace, dtype_options)
@@ -604,7 +604,7 @@ def all_gather(
             input_dtype=x.dtype,
             requires_grad=x.requires_grad,
             async_op=async_op,
-            input_is_leaf=x.requires_grad and x.grad_fn is None,
+            input_is_leaf=x.requires_grad and x.is_leaf,
         )
         if split_sizes is not None:
             return _AllGatherUneven.apply(
@@ -886,7 +886,7 @@ def reduce_scatter(
         input_dtype=x.dtype,
         requires_grad=x.requires_grad,
         async_op=async_op,
-        input_is_leaf=x.requires_grad and x.grad_fn is None,
+        input_is_leaf=x.requires_grad and x.is_leaf,
     )
 
     if dst is V:
@@ -1238,7 +1238,7 @@ def all_to_all(
         input_dtype=x.dtype,
         requires_grad=x.requires_grad,
         async_op=async_op,
-        input_is_leaf=x.requires_grad and x.grad_fn is None,
+        input_is_leaf=x.requires_grad and x.is_leaf,
     )
 
     if output_split_sizes is not None or input_split_sizes is not None:
