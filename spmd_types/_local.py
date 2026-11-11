@@ -62,7 +62,8 @@ def _build_rank_to_group_local(pg) -> dict[int, int]:
       - Groups are [0,1] and [2,3]
       - Returns {0: 0, 1: 1, 2: 0, 3: 1}
     """
-    ranks, group_offsets, _offset = _prepare_collective_groups(pg)
+    # Older torch also returns the group's base offset as a third element.
+    ranks, group_offsets = _prepare_collective_groups(pg)[:2]
     mapping = {}
     for group_offset in group_offsets:
         for local_rank, r in enumerate(ranks):
