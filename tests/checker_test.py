@@ -4254,13 +4254,13 @@ class TestNoTypecheckDecorator(LocalTensorTestCase, expecttest.TestCase):
         self.assertExpectedInline(
             str(ctx.exception), """out_types is required for typed no_typecheck"""
         )
-        with self.assertRaises(TypeError) as ctx:
+        # Python 3.14 appends "(missed __exit__ method)" to this message.
+        with self.assertRaisesRegex(
+            TypeError,
+            r"^'function' object does not support the context manager protocol",
+        ):
             with no_typecheck(out_types={"tp": R}):
                 pass
-        self.assertExpectedInline(
-            str(ctx.exception),
-            """'function' object does not support the context manager protocol""",
-        )
 
 
 class TestLocalMap(LocalTensorTestCase, expecttest.TestCase):
