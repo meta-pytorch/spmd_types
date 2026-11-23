@@ -334,7 +334,7 @@ class _AllGatherShard(torch.autograd.Function):
         pg = axis
         x = x.contiguous()
         result = _maybe_wait(
-            funcol.all_gather_tensor(x, gather_dim, pg), dtype_options.async_op
+            funcol.all_gather_single(x, gather_dim, pg), dtype_options.async_op
         )
         return _apply_out_dtype(result, dtype_options.out_dtype)
 
@@ -682,7 +682,7 @@ class _ReduceScatterShard(torch.autograd.Function):
         # gradients (e.g. from sum()) can be expanded views.
         x = x.contiguous()
         result = _maybe_wait(
-            funcol.reduce_scatter_tensor(x, "sum", scatter_dim, pg),
+            funcol.reduce_scatter_single(x, "sum", scatter_dim, pg),
             dtype_options.async_op,
         )
         return _apply_out_dtype(result, dtype_options.out_dtype)
